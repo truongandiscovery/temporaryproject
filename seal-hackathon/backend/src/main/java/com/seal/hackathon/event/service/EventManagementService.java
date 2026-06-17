@@ -1,34 +1,23 @@
 package com.seal.hackathon.event.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.seal.hackathon.common.ApiException;
-import com.seal.hackathon.evaluation.service.AuditLogService;
-import com.seal.hackathon.event.dto.EventManagementDto;
 import com.seal.hackathon.event.dto.EventConfigurationUpdateRequest;
+import com.seal.hackathon.event.dto.EventManagementDto;
 import com.seal.hackathon.event.dto.EventSetupCreateRequest;
+import com.seal.hackathon.event.dto.EventStructureConfigDto;
 import com.seal.hackathon.event.dto.EventUpsertRequest;
-import com.seal.hackathon.event.dto.EventWizardAwardRequest;
-import com.seal.hackathon.event.dto.EventWizardCriterionRequest;
-import com.seal.hackathon.event.dto.EventWizardDetailDto;
-import com.seal.hackathon.event.dto.EventWizardRequest;
-import com.seal.hackathon.event.dto.EventWizardRoundRequest;
-import com.seal.hackathon.event.dto.EventWizardTrackRequest;
-import com.seal.hackathon.event.dto.RoundConfigurationRequest;
 import com.seal.hackathon.event.dto.RoundManagementDto;
 import com.seal.hackathon.event.dto.RoundUpsertRequest;
 import com.seal.hackathon.event.dto.TrackDto;
-import com.seal.hackathon.event.dto.TrackConfigurationRequest;
 import com.seal.hackathon.event.dto.TrackUpsertRequest;
 import com.seal.hackathon.event.entity.EventStatus;
 import com.seal.hackathon.event.entity.HackathonEventEntity;
 import com.seal.hackathon.event.entity.RoundEntity;
-import com.seal.hackathon.event.entity.ScoringCriteriaEntity;
 import com.seal.hackathon.event.entity.TrackEntity;
 import com.seal.hackathon.event.repository.HackathonEventRepository;
 import com.seal.hackathon.event.repository.RoundRepository;
-import com.seal.hackathon.event.repository.ScoringCriteriaRepository;
 import com.seal.hackathon.event.repository.TrackRepository;
 import com.seal.hackathon.team.repository.TeamRepository;
 import org.springframework.http.HttpStatus;
@@ -37,256 +26,136 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.Month;
-import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Service
 public class EventManagementService {
 
     private static final int MIN_TEAM_SIZE = 3;
     private static final int MAX_TEAM_SIZE = 5;
-
-    private static final Map<String, String> ALLOWED_SEMESTERS = Map.of(
-            "SPRING", "Spring",
-            "SUMMER", "Summer",
-            "FALL", "Fall"
+    private static final Pattern KEY_SANITIZER = Pattern.compile("[^a-z0-9]+");
+    private static final List<String> SEASON_ORDER = List.of("Spring", "Summer", "Fall");
+    private static final Set<String> ALLOWED_TRACK_SELECTION_MODES = Set.of("TEAM_SELECT", "SYSTEM_RANDOM");
+    private static final Set<String> ALLOWED_FINAL_RANKING_MODES = Set.of("RANK_BY_SCORE", "ADDITIONAL_COMPETITION");
+    private static final Set<String> ALLOWED_OVERALL_ELIGIBILITY = Set.of(
+            "CHAMPION_ONLY",
+            "TOP_3_EACH_SEMESTER",
+            "ALL_AWARDED_TEAMS",
+            "CUSTOM_RULE"
+    );
+    private static final Set<String> ALLOWED_OVERALL_METHODS = Set.of(
+            "SUM_SCORES_ACROSS_SEMESTERS",
+            "ADDITIONAL_GRAND_FINAL_COMPETITION"
     );
 
     private final HackathonEventRepository eventRepository;
     private final TrackRepository trackRepository;
     private final RoundRepository roundRepository;
-    private final ScoringCriteriaRepository scoringCriteriaRepository;
     private final TeamRepository teamRepository;
     private final ObjectMapper objectMapper;
-    private final AuditLogService auditLogService;
 
     public EventManagementService(HackathonEventRepository eventRepository,
-                                   TrackRepository trackRepository,
-                                   RoundRepository roundRepository,
-                                   ScoringCriteriaRepository scoringCriteriaRepository,
-                                   TeamRepository teamRepository,
-                                   ObjectMapper objectMapper,
-                                   AuditLogService auditLogService) {
+                                  TrackRepository trackRepository,
+                                  RoundRepository roundRepository,
+                                  TeamRepository teamRepository,
+                                  ObjectMapper objectMapper) {
         this.eventRepository = eventRepository;
         this.trackRepository = trackRepository;
         this.roundRepository = roundRepository;
-        this.scoringCriteriaRepository = scoringCriteriaRepository;
         this.teamRepository = teamRepository;
         this.objectMapper = objectMapper;
-        this.auditLogService = auditLogService;
     }
 
-    @Transactional
-    public java.util.List<EventManagementDto> listEvents() {
-        return eventRepository.findAllByOrderByEventIdDesc()
+    @Transactional(readOnly = true)
+    public List<EventManagementDto> listEvents() {
+        return eventRepository.findAllByOrderByStartDateDescEventIdDesc()
                 .stream()
-                .map(this::synchronizeLifecycleStatus)
                 .map(this::toEventDto)
                 .toList();
     }
 
     @Transactional
-    public EventWizardDetailDto getEventWizard(Integer eventId) {
-        HackathonEventEntity event = synchronizeLifecycleStatus(getEventOrThrow(eventId));
-        return toWizardDetailDto(event);
-    }
-
-    @Transactional
-    public EventWizardDetailDto createEventWizard(EventWizardRequest request) {
-        EventDraftSnapshot snapshot = sanitizeWizardRequest(request);
-        if (snapshot.name().isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Event name is required");
-        }
-        if (snapshot.semester().isBlank() || snapshot.year() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Semester is required");
-        }
-
-        String semester = normalizeSemester(snapshot.semester());
-        ensureSemesterYearUnique(snapshot.year(), semester, null);
-
-        HackathonEventEntity event = new HackathonEventEntity();
-        applyWizardSnapshot(event, snapshot, semester);
-        event.setStatus(EventStatus.DRAFT.getDbValue());
-        event.setPublishedAt(null);
-        HackathonEventEntity savedEvent = eventRepository.save(event);
-
-        syncWizardTracks(savedEvent.getEventId(), snapshot.tracks());
-        syncWizardRounds(savedEvent.getEventId(), snapshot.qualifyingRounds(), snapshot.finalRound());
-        auditLogService.record(
-                "EVENT_CREATED",
-                "EVENT",
-                savedEvent.getEventId(),
-                savedEvent.getName(),
-                null,
-                toEventAuditPayload(savedEvent),
-                "Coordinator created a draft event"
-        );
-
-        return toWizardDetailDto(savedEvent);
-    }
-
-    @Transactional
-    public EventWizardDetailDto updateEventWizard(Integer eventId, EventWizardRequest request) {
-        HackathonEventEntity event = getEventOrThrow(eventId);
-        ensureDraftEditable(event);
-        Map<String, Object> previous = toEventAuditPayload(event);
-
-        EventDraftSnapshot snapshot = sanitizeWizardRequest(request);
-        if (snapshot.name().isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Event name is required");
-        }
-        if (snapshot.semester().isBlank() || snapshot.year() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Semester is required");
-        }
-
-        String semester = normalizeSemester(snapshot.semester());
-        ensureSemesterYearUnique(snapshot.year(), semester, eventId);
-
-        applyWizardSnapshot(event, snapshot, semester);
-        eventRepository.save(event);
-        syncWizardTracks(eventId, snapshot.tracks());
-        syncWizardRounds(eventId, snapshot.qualifyingRounds(), snapshot.finalRound());
-        auditLogService.record(
-                "EVENT_UPDATED",
-                "EVENT",
-                event.getEventId(),
-                event.getName(),
-                previous,
-                toEventAuditPayload(event),
-                "Coordinator updated draft event information"
-        );
-
-        return toWizardDetailDto(event);
-    }
-
-    @Transactional
-    public EventWizardDetailDto publishEvent(Integer eventId) {
-        HackathonEventEntity event = getEventOrThrow(eventId);
-        ensureDraftEditable(event);
-        Map<String, Object> previous = toEventAuditPayload(event);
-
-        List<TrackEntity> tracks = trackRepository.findByEventIdOrderByTrackIdAsc(eventId);
-        List<RoundEntity> rounds = roundRepository.findByEventIdOrderByRoundOrderAsc(eventId);
-        validatePublishableEvent(event, tracks, rounds);
-
-        EventStatus publishedStatus = event.getCompetitionEndAt() != null
-                && !event.getCompetitionEndAt().isAfter(LocalDateTime.now())
-                ? EventStatus.ENDED
-                : EventStatus.ONGOING;
-        event.setStatus(publishedStatus.getDbValue());
-        event.setPublishedAt(LocalDateTime.now());
-        eventRepository.saveAndFlush(event);
-        auditLogService.record(
-                "EVENT_PUBLISHED",
-                "EVENT",
-                event.getEventId(),
-                event.getName(),
-                previous,
-                toEventAuditPayload(event),
-                "Coordinator published the event configuration"
-        );
-
-        return toWizardDetailDto(event);
-    }
-
-    @Transactional
     public EventManagementDto createEvent(EventUpsertRequest request) {
         validateEventDateRange(request.startDate(), request.endDate());
-        String semester = normalizeSemester(request.semester());
-        ensureSemesterYearUnique(request.year(), semester, null);
         HackathonEventEntity event = new HackathonEventEntity();
-        applyEventRequest(event, request, semester, true);
+        applyEventRequest(event, request, normalizeLegacySeasonSummary(request.season()), true);
         return toEventDto(eventRepository.save(event));
     }
 
     @Transactional
     public EventManagementDto createEventWithInitialConfiguration(EventSetupCreateRequest request) {
-        validateInitialConfiguration(
-                request.event().startDate(),
-                request.event().endDate(),
-                request.tracks(),
-                request.rounds()
-        );
-
-        EventManagementDto createdEvent = createEvent(request.event());
-        Integer eventId = createdEvent.eventId();
-
-        for (TrackUpsertRequest trackRequest : request.tracks()) {
-            createTrack(eventId, trackRequest);
-        }
-        for (RoundUpsertRequest roundRequest : request.rounds()) {
-            createRound(eventId, roundRequest);
+        EventStatus requestedStatus = EventStatus.from(request.event().status());
+        EventStructureConfigDto configuration = requestedStatus == EventStatus.DRAFT
+                ? normalizeDraftConfiguration(request.configuration())
+                : normalizeAndValidateConfiguration(
+                        request.configuration(),
+                        request.event().startDate(),
+                        request.event().endDate()
+                );
+        if (requestedStatus != EventStatus.DRAFT) {
+            validateEventDateRange(request.event().startDate(), request.event().endDate());
+            validateNoSemesterOverlap(configuration, null);
         }
 
-        return createdEvent;
+        HackathonEventEntity event = new HackathonEventEntity();
+        applyEventRequest(event, request.event(), buildSeasonSummary(configuration), true);
+        event.setConfigurationJson(writeConfiguration(configuration));
+        return toEventDto(eventRepository.save(event));
     }
 
     @Transactional
     public EventManagementDto updateEvent(Integer eventId, EventUpsertRequest request) {
         validateEventDateRange(request.startDate(), request.endDate());
         HackathonEventEntity event = getEventOrThrow(eventId);
-        String semester = normalizeSemester(request.semester());
-        ensureSemesterYearUnique(request.year(), semester, eventId);
         validateExistingRoundDeadlines(eventId, request.startDate(), request.endDate());
-        applyEventRequest(event, request, semester, false);
+        applyEventRequest(event, request, normalizeLegacySeasonSummary(request.season()), false);
         return toEventDto(eventRepository.save(event));
     }
 
     @Transactional
     public EventManagementDto updateEventConfiguration(Integer eventId, EventConfigurationUpdateRequest request) {
-        validateInitialConfiguration(
-                request.event().startDate(),
-                request.event().endDate(),
-                request.tracks().stream().map(track -> new TrackUpsertRequest(track.name())).toList(),
-                request.rounds().stream().map(round -> new RoundUpsertRequest(
-                        round.roundName(),
-                        round.roundOrder(),
-                        round.submissionDeadline(),
-                        round.promotionRuleTopN()
-                )).toList()
-        );
+        EventStatus requestedStatus = EventStatus.from(request.event().status());
+        EventStructureConfigDto configuration = requestedStatus == EventStatus.DRAFT
+                ? normalizeDraftConfiguration(request.configuration())
+                : normalizeAndValidateConfiguration(
+                        request.configuration(),
+                        request.event().startDate(),
+                        request.event().endDate()
+                );
+        if (requestedStatus != EventStatus.DRAFT) {
+            validateEventDateRange(request.event().startDate(), request.event().endDate());
+            validateNoSemesterOverlap(configuration, eventId);
+        }
 
         HackathonEventEntity event = getEventOrThrow(eventId);
-        String semester = normalizeSemester(request.event().semester());
-        ensureSemesterYearUnique(request.event().year(), semester, eventId);
-        applyEventRequestWithoutConfiguredReadiness(event, request.event(), semester);
-        eventRepository.save(event);
-
-        syncTracks(eventId, request.tracks());
-        syncRounds(eventId, request.rounds());
-
-        return toEventDto(event);
+        applyEventRequestWithoutConfiguredReadiness(event, request.event(), buildSeasonSummary(configuration));
+        event.setConfigurationJson(writeConfiguration(configuration));
+        return toEventDto(eventRepository.save(event));
     }
 
     @Transactional
     public void deleteEvent(Integer eventId) {
-        HackathonEventEntity event = getEventOrThrow(eventId);
+        if (!eventRepository.existsById(eventId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "Event not found");
+        }
         if (teamRepository.countByEventId(eventId) > 0) {
             throw new ApiException(HttpStatus.CONFLICT, "Event cannot be deleted after teams have registered");
         }
-        Map<String, Object> previous = toEventAuditPayload(event);
         eventRepository.deleteById(eventId);
-        auditLogService.record(
-                "EVENT_DELETED",
-                "EVENT",
-                eventId,
-                event.getName(),
-                previous,
-                null,
-                "Coordinator deleted an event without participants"
-        );
     }
 
     @Transactional(readOnly = true)
-    public java.util.List<TrackDto> listTracks(Integer eventId) {
+    public List<TrackDto> listTracks(Integer eventId) {
         ensureEventExists(eventId);
         return trackRepository.findByEventIdOrderByTrackIdAsc(eventId)
                 .stream()
@@ -296,7 +165,7 @@ public class EventManagementService {
 
     @Transactional
     public TrackDto createTrack(Integer eventId, TrackUpsertRequest request) {
-        HackathonEventEntity event = getEventOrThrow(eventId);
+        ensureEventExists(eventId);
         String trackName = request.name().trim();
         if (trackRepository.existsByEventIdAndNameIgnoreCase(eventId, trackName)) {
             throw new ApiException(HttpStatus.CONFLICT, "Track name already exists in this event");
@@ -305,24 +174,13 @@ public class EventManagementService {
         TrackEntity track = new TrackEntity();
         track.setEventId(eventId);
         track.setName(trackName);
-        TrackDto dto = toTrackDto(trackRepository.save(track));
-        auditLogService.record(
-                "TRACK_CREATED",
-                "TRACK",
-                dto.trackId(),
-                dto.name(),
-                null,
-                dto,
-                "Coordinator created a track for event " + event.getName()
-        );
-        return dto;
+        return toTrackDto(trackRepository.save(track));
     }
 
     @Transactional
     public TrackDto updateTrack(Integer trackId, TrackUpsertRequest request) {
         TrackEntity track = trackRepository.findById(trackId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Track not found"));
-        TrackDto previous = toTrackDto(track);
 
         String nextName = request.name().trim();
         if (!track.getName().equalsIgnoreCase(nextName)
@@ -330,17 +188,7 @@ public class EventManagementService {
             throw new ApiException(HttpStatus.CONFLICT, "Track name already exists in this event");
         }
         track.setName(nextName);
-        TrackDto updated = toTrackDto(trackRepository.save(track));
-        auditLogService.record(
-                "TRACK_UPDATED",
-                "TRACK",
-                updated.trackId(),
-                updated.name(),
-                previous,
-                updated,
-                "Coordinator updated a track"
-        );
-        return updated;
+        return toTrackDto(trackRepository.save(track));
     }
 
     @Transactional
@@ -351,21 +199,11 @@ public class EventManagementService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Each event must keep at least one track");
         }
         requireTrackHasNoTeams(track.getTrackId());
-        TrackDto previous = toTrackDto(track);
         trackRepository.deleteById(trackId);
-        auditLogService.record(
-                "TRACK_DELETED",
-                "TRACK",
-                trackId,
-                track.getName(),
-                previous,
-                null,
-                "Coordinator deleted an unused track"
-        );
     }
 
     @Transactional(readOnly = true)
-    public java.util.List<RoundManagementDto> listRounds(Integer eventId) {
+    public List<RoundManagementDto> listRounds(Integer eventId) {
         ensureEventExists(eventId);
         return roundRepository.findByEventIdOrderByRoundOrderAsc(eventId)
                 .stream()
@@ -376,7 +214,7 @@ public class EventManagementService {
     @Transactional
     public RoundManagementDto createRound(Integer eventId, RoundUpsertRequest request) {
         HackathonEventEntity event = getEventOrThrow(eventId);
-        validateRoundValues(request);
+        validateLegacyRoundValues(request);
         validateSubmissionDeadlineWithinEvent(event.getStartDate(), event.getEndDate(), request.submissionDeadline());
         List<RoundEntity> existingRounds = roundRepository.findByEventIdOrderByRoundOrderAsc(eventId);
         validateRoundInsertPosition(request.roundOrder(), existingRounds.size() + 1);
@@ -385,17 +223,7 @@ public class EventManagementService {
         RoundEntity round = new RoundEntity();
         round.setEventId(eventId);
         applyRoundRequest(round, request);
-        RoundManagementDto dto = toRoundDto(roundRepository.save(round));
-        auditLogService.record(
-                "ROUND_CREATED",
-                "ROUND",
-                dto.roundId(),
-                dto.roundName(),
-                null,
-                dto,
-                "Coordinator created a round for event " + event.getName()
-        );
-        return dto;
+        return toRoundDto(roundRepository.save(round));
     }
 
     @Transactional
@@ -403,24 +231,13 @@ public class EventManagementService {
         RoundEntity round = roundRepository.findById(roundId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Round not found"));
         HackathonEventEntity event = getEventOrThrow(round.getEventId());
-        RoundManagementDto previous = toRoundDto(round);
-        validateRoundValues(request);
+        validateLegacyRoundValues(request);
         validateSubmissionDeadlineWithinEvent(event.getStartDate(), event.getEndDate(), request.submissionDeadline());
         List<RoundEntity> roundsInEvent = roundRepository.findByEventIdOrderByRoundOrderAsc(round.getEventId());
         validateRoundInsertPosition(request.roundOrder(), roundsInEvent.size());
         reorderRoundsForMove(roundsInEvent, roundId, request.roundOrder());
         applyRoundRequest(round, request);
-        RoundManagementDto updated = toRoundDto(roundRepository.save(round));
-        auditLogService.record(
-                "ROUND_UPDATED",
-                "ROUND",
-                updated.roundId(),
-                updated.roundName(),
-                previous,
-                updated,
-                "Coordinator updated round settings for event " + event.getName()
-        );
-        return updated;
+        return toRoundDto(roundRepository.save(round));
     }
 
     @Transactional
@@ -430,21 +247,8 @@ public class EventManagementService {
         }
         RoundEntity round = roundRepository.findById(roundId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Round not found"));
-        Boolean previous = round.getScoreLocked();
         round.setScoreLocked(scoreLocked);
-        RoundManagementDto updated = toRoundDto(roundRepository.save(round));
-        auditLogService.record(
-                Boolean.TRUE.equals(scoreLocked) ? "ROUND_SUBMISSION_CLOSED" : "ROUND_SUBMISSION_OPENED",
-                "ROUND",
-                updated.roundId(),
-                updated.roundName(),
-                previous,
-                updated.scoreLocked(),
-                Boolean.TRUE.equals(scoreLocked)
-                        ? "Coordinator closed the round for further scoring updates"
-                        : "Coordinator reopened the round for scoring updates"
-        );
-        return updated;
+        return toRoundDto(roundRepository.save(round));
     }
 
     @Transactional
@@ -455,69 +259,532 @@ public class EventManagementService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Each event must keep at least one round");
         }
         Integer removedOrder = round.getRoundOrder();
-        RoundManagementDto previous = toRoundDto(round);
         roundRepository.deleteById(roundId);
         List<RoundEntity> remainingRounds = roundRepository.findByEventIdOrderByRoundOrderAsc(round.getEventId());
         for (RoundEntity remaining : remainingRounds) {
-          if (remaining.getRoundOrder() > removedOrder) {
-              remaining.setRoundOrder(remaining.getRoundOrder() - 1);
-              roundRepository.save(remaining);
-          }
+            if (remaining.getRoundOrder() > removedOrder) {
+                remaining.setRoundOrder(remaining.getRoundOrder() - 1);
+                roundRepository.save(remaining);
+            }
         }
-        auditLogService.record(
-                "ROUND_DELETED",
-                "ROUND",
-                roundId,
-                round.getRoundName(),
-                previous,
-                null,
-                "Coordinator deleted a round"
+    }
+
+    private EventStructureConfigDto normalizeAndValidateConfiguration(EventStructureConfigDto configuration,
+                                                                      LocalDate startDate,
+                                                                      LocalDate endDate) {
+        if (configuration == null || configuration.seasons() == null || configuration.seasons().isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Event must include at least one semester");
+        }
+
+        List<EventStructureConfigDto.SeasonConfigDto> orderedInputSeasons = configuration.seasons().stream()
+                .sorted(Comparator
+                        .comparingInt((EventStructureConfigDto.SeasonConfigDto season) -> season.year() == null ? Integer.MAX_VALUE : season.year())
+                        .thenComparingInt(season -> seasonIndex(normalizeSeasonName(season.season()))))
+                .toList();
+
+        List<EventStructureConfigDto.SeasonConfigDto> normalizedSeasons = new ArrayList<>();
+        SemesterRef previousSemester = null;
+
+        for (EventStructureConfigDto.SeasonConfigDto season : orderedInputSeasons) {
+            String normalizedSeasonName = normalizeSeasonName(season.season());
+            Integer year = requirePositiveYear(season.year());
+            SemesterRef currentSemester = new SemesterRef(normalizedSeasonName, year);
+
+            if (previousSemester != null && !isNextSemester(previousSemester, currentSemester)) {
+                throw new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "Selected semesters must be consecutive from start semester to end semester"
+                );
+            }
+            previousSemester = currentSemester;
+
+            LocalDate allowedStart = getSemesterStartDate(currentSemester);
+            LocalDate allowedEnd = getSemesterEndDate(currentSemester);
+
+            LocalDate registrationStartDate = requireDateWithinSemester(
+                    season.registrationStartDate(),
+                    allowedStart,
+                    allowedEnd,
+                    semesterLabel(currentSemester) + " registration start date must stay inside the semester range"
+            );
+            LocalDate registrationEndDate = requireDateWithinSemester(
+                    season.registrationEndDate(),
+                    allowedStart,
+                    allowedEnd,
+                    semesterLabel(currentSemester) + " registration end date must stay inside the semester range"
+            );
+            LocalDate competitionStartDate = requireDateWithinSemester(
+                    season.competitionStartDate(),
+                    allowedStart,
+                    allowedEnd,
+                    semesterLabel(currentSemester) + " competition start date must stay inside the semester range"
+            );
+            LocalDate competitionEndDate = requireDateWithinSemester(
+                    season.competitionEndDate(),
+                    allowedStart,
+                    allowedEnd,
+                    semesterLabel(currentSemester) + " competition end date must stay inside the semester range"
+            );
+
+            if (registrationStartDate.isAfter(registrationEndDate)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(currentSemester) + " registration start date must be before or equal to registration end date");
+            }
+            if (registrationEndDate.isAfter(competitionStartDate)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(currentSemester) + " registration end date must be before or equal to competition start date");
+            }
+            if (competitionStartDate.isAfter(competitionEndDate)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(currentSemester) + " competition start date must be before or equal to competition end date");
+            }
+
+            String trackSelectionMode = normalizeTrackSelectionMode(season.trackSelectionMode());
+            List<EventStructureConfigDto.TrackConfigDto> normalizedTracks = normalizeTracks(season.tracks(), currentSemester);
+            Map<String, EventStructureConfigDto.TrackConfigDto> tracksByKey = normalizedTracks.stream().collect(Collectors.toMap(
+                    EventStructureConfigDto.TrackConfigDto::trackKey,
+                    track -> track,
+                    (left, right) -> left,
+                    LinkedHashMap::new
+            ));
+
+            List<EventStructureConfigDto.RoundStageConfigDto> normalizedRounds = normalizeRounds(
+                    season.rounds(),
+                    competitionStartDate,
+                    competitionEndDate,
+                    currentSemester
+            );
+            Map<String, EventStructureConfigDto.RoundStageConfigDto> roundsByKey = normalizedRounds.stream().collect(Collectors.toMap(
+                    EventStructureConfigDto.RoundStageConfigDto::roundKey,
+                    round -> round,
+                    (left, right) -> left,
+                    LinkedHashMap::new
+            ));
+
+            List<EventStructureConfigDto.PromotionRuleDto> normalizedPromotionRules = normalizePromotionRules(
+                    season.promotionRules(),
+                    tracksByKey,
+                    roundsByKey,
+                    currentSemester
+            );
+
+            String finalRankingMode = normalizeSeasonFinalRankingMode(season.finalRankingMode());
+            List<String> additionalFinalActivities = "ADDITIONAL_COMPETITION".equals(finalRankingMode)
+                    ? normalizeActivities(season.additionalFinalActivities(), "Add at least one additional final activity")
+                    : List.of();
+
+            List<EventStructureConfigDto.AwardConfigDto> normalizedAwards = normalizeAwards(
+                    season.awards(),
+                    "Semester " + semesterLabel(currentSemester) + " must include at least one award"
+            );
+
+            Integer finalEligibleTeams = estimateEligibleFinalTeams(normalizedRounds, normalizedPromotionRules);
+            int totalAwardQuantity = normalizedAwards.stream().mapToInt(EventStructureConfigDto.AwardConfigDto::quantity).sum();
+            if (finalEligibleTeams != null && totalAwardQuantity > finalEligibleTeams) {
+                throw new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "Semester " + semesterLabel(currentSemester) + " has more award slots than eligible final teams"
+                );
+            }
+
+            normalizedSeasons.add(new EventStructureConfigDto.SeasonConfigDto(
+                    normalizedSeasonName,
+                    year,
+                    registrationStartDate,
+                    registrationEndDate,
+                    competitionStartDate,
+                    competitionEndDate,
+                    trackSelectionMode,
+                    normalizedTracks,
+                    normalizedRounds,
+                    normalizedPromotionRules,
+                    finalRankingMode,
+                    additionalFinalActivities,
+                    normalizedAwards
+            ));
+        }
+
+        String derivedStartSemester = semesterLabel(toSemesterRef(normalizedSeasons.get(0)));
+        String derivedEndSemester = semesterLabel(toSemesterRef(normalizedSeasons.get(normalizedSeasons.size() - 1)));
+        String requestedStartSemester = configuration.startSemester() == null || configuration.startSemester().isBlank()
+                ? derivedStartSemester
+                : requireTrimmedValue(configuration.startSemester(), "Start semester is required");
+        String requestedEndSemester = configuration.endSemester() == null || configuration.endSemester().isBlank()
+                ? derivedEndSemester
+                : requireTrimmedValue(configuration.endSemester(), "End semester is required");
+
+        if (!requestedStartSemester.equalsIgnoreCase(derivedStartSemester)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Start semester does not match the generated semester range");
+        }
+        if (!requestedEndSemester.equalsIgnoreCase(derivedEndSemester)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "End semester does not match the generated semester range");
+        }
+
+        boolean overallGrandFinalEnabled = Boolean.TRUE.equals(configuration.overallGrandFinalEnabled());
+        LocalDate overallGrandFinalStartDate = null;
+        LocalDate overallGrandFinalEndDate = null;
+        if (overallGrandFinalEnabled) {
+            LocalDate lastSeasonRangeStart = normalizedSeasons.stream()
+                    .map(EventStructureConfigDto.SeasonConfigDto::competitionEndDate)
+                    .filter(Objects::nonNull)
+                    .max(LocalDate::compareTo)
+                    .orElse(getSemesterStartDate(toSemesterRef(normalizedSeasons.get(normalizedSeasons.size() - 1))));
+            LocalDate lastSeasonRangeEnd = getSemesterEndDate(toSemesterRef(normalizedSeasons.get(normalizedSeasons.size() - 1)));
+            overallGrandFinalStartDate = requireDateWithinRange(
+                    configuration.overallGrandFinalStartDate(),
+                    lastSeasonRangeStart,
+                    lastSeasonRangeEnd,
+                    "Grand final start date must stay inside the final semester window"
+            );
+            overallGrandFinalEndDate = requireDateWithinRange(
+                    configuration.overallGrandFinalEndDate(),
+                    lastSeasonRangeStart,
+                    lastSeasonRangeEnd,
+                    "Grand final end date must stay inside the final semester window"
+            );
+            if (overallGrandFinalStartDate.isAfter(overallGrandFinalEndDate)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Grand final start date must be before or equal to end date");
+            }
+        }
+        String overallGrandFinalEligibility = overallGrandFinalEnabled
+                ? normalizeOverallGrandFinalEligibility(configuration.overallGrandFinalEligibility())
+                : null;
+        String overallGrandFinalMethod = overallGrandFinalEnabled
+                ? normalizeOverallGrandFinalMethod(configuration.overallGrandFinalMethod())
+                : null;
+        List<String> overallAdditionalActivities = overallGrandFinalEnabled
+                && "ADDITIONAL_GRAND_FINAL_COMPETITION".equals(overallGrandFinalMethod)
+                ? normalizeActivities(configuration.overallAdditionalActivities(), "Add at least one grand final activity")
+                : List.of();
+        List<EventStructureConfigDto.AwardConfigDto> overallAwards = overallGrandFinalEnabled
+                ? normalizeAwards(configuration.overallAwards(), "Overall grand final must include at least one award")
+                : List.of();
+
+        return new EventStructureConfigDto(
+                derivedStartSemester,
+                derivedEndSemester,
+                normalizedSeasons,
+                overallGrandFinalEnabled,
+                overallGrandFinalStartDate,
+                overallGrandFinalEndDate,
+                overallGrandFinalEligibility,
+                overallGrandFinalMethod,
+                overallAdditionalActivities,
+                overallAwards
         );
     }
 
-    private void validateInitialConfiguration(LocalDate startDate,
-                                              LocalDate endDate,
-                                              List<TrackUpsertRequest> tracks,
-                                              List<RoundUpsertRequest> rounds) {
-        if (tracks == null || tracks.isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Each event must be created with at least one track");
+    private EventStructureConfigDto normalizeDraftConfiguration(EventStructureConfigDto configuration) {
+        List<SemesterRef> semesterRange = normalizeDraftSemesterRange(configuration);
+
+        Map<String, EventStructureConfigDto.SeasonConfigDto> existingSeasonsByLabel = new LinkedHashMap<>();
+        if (configuration != null && configuration.seasons() != null) {
+            for (EventStructureConfigDto.SeasonConfigDto season : configuration.seasons()) {
+                if (season == null || season.season() == null || season.year() == null) {
+                    continue;
+                }
+                SemesterRef ref = new SemesterRef(normalizeSeasonName(season.season()), requirePositiveYear(season.year()));
+                existingSeasonsByLabel.put(semesterLabel(ref), season);
+            }
         }
-        if (rounds == null || rounds.isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Each event must be created with at least one round");
+
+        List<EventStructureConfigDto.SeasonConfigDto> normalizedSeasons = semesterRange.stream()
+                .map(ref -> {
+                    EventStructureConfigDto.SeasonConfigDto season = existingSeasonsByLabel.get(semesterLabel(ref));
+                    return new EventStructureConfigDto.SeasonConfigDto(
+                            ref.season(),
+                            ref.year(),
+                            season == null ? null : season.registrationStartDate(),
+                            season == null ? null : season.registrationEndDate(),
+                            season == null ? null : season.competitionStartDate(),
+                            season == null ? null : season.competitionEndDate(),
+                            normalizeOptionalTrackSelectionMode(season == null ? null : season.trackSelectionMode()),
+                            normalizeDraftTracks(season == null ? null : season.tracks()),
+                            normalizeDraftRounds(season == null ? null : season.rounds()),
+                            normalizeDraftPromotionRules(season == null ? null : season.promotionRules()),
+                            normalizeOptionalSeasonFinalRankingMode(season == null ? null : season.finalRankingMode()),
+                            normalizeDraftActivities(season == null ? null : season.additionalFinalActivities()),
+                            normalizeDraftAwards(season == null ? null : season.awards())
+                    );
+                })
+                .toList();
+
+        boolean overallGrandFinalEnabled = configuration != null && Boolean.TRUE.equals(configuration.overallGrandFinalEnabled());
+        return new EventStructureConfigDto(
+                semesterLabel(semesterRange.get(0)),
+                semesterLabel(semesterRange.get(semesterRange.size() - 1)),
+                normalizedSeasons,
+                overallGrandFinalEnabled,
+                overallGrandFinalEnabled ? configuration.overallGrandFinalStartDate() : null,
+                overallGrandFinalEnabled ? configuration.overallGrandFinalEndDate() : null,
+                overallGrandFinalEnabled
+                        ? normalizeOptionalOverallGrandFinalEligibility(configuration.overallGrandFinalEligibility())
+                        : null,
+                overallGrandFinalEnabled
+                        ? normalizeOptionalOverallGrandFinalMethod(configuration.overallGrandFinalMethod())
+                        : null,
+                overallGrandFinalEnabled
+                        ? normalizeDraftActivities(configuration.overallAdditionalActivities())
+                        : List.of(),
+                overallGrandFinalEnabled
+                        ? normalizeDraftAwards(configuration.overallAwards())
+                        : List.of()
+        );
+    }
+
+    private List<SemesterRef> normalizeDraftSemesterRange(EventStructureConfigDto configuration) {
+        SemesterRef parsedStart = safeParseSemesterLabel(configuration == null ? null : configuration.startSemester());
+        SemesterRef parsedEnd = safeParseSemesterLabel(configuration == null ? null : configuration.endSemester());
+
+        List<SemesterRef> validSeasonRefs = new ArrayList<>();
+        if (configuration != null && configuration.seasons() != null) {
+            for (EventStructureConfigDto.SeasonConfigDto season : configuration.seasons()) {
+                if (season == null) {
+                    continue;
+                }
+                try {
+                    validSeasonRefs.add(new SemesterRef(
+                            normalizeSeasonName(season.season()),
+                            requirePositiveYear(season.year())
+                    ));
+                } catch (ApiException ignored) {
+                    // Draft mode accepts incomplete semester values.
+                }
+            }
+        }
+        validSeasonRefs = validSeasonRefs.stream().distinct().sorted(this::compareSemesterRefs).toList();
+
+        SemesterRef fallback = parsedStart;
+        if (fallback == null) {
+            fallback = parsedEnd;
+        }
+        if (fallback == null && !validSeasonRefs.isEmpty()) {
+            fallback = validSeasonRefs.get(0);
+        }
+        if (fallback == null) {
+            fallback = new SemesterRef("Spring", LocalDate.now().getYear());
+        }
+
+        SemesterRef start = parsedStart == null ? (!validSeasonRefs.isEmpty() ? validSeasonRefs.get(0) : fallback) : parsedStart;
+        SemesterRef end = parsedEnd == null ? (!validSeasonRefs.isEmpty() ? validSeasonRefs.get(validSeasonRefs.size() - 1) : fallback) : parsedEnd;
+
+        if (compareSemesterRefs(start, end) > 0) {
+            end = start;
+        }
+
+        return buildConsecutiveSemesterRange(start, end);
+    }
+
+    private List<EventStructureConfigDto.TrackConfigDto> normalizeTracks(List<EventStructureConfigDto.TrackConfigDto> tracks,
+                                                                         SemesterRef semester) {
+        if (tracks == null || tracks.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " must include at least one track");
         }
 
         Set<String> trackNames = new HashSet<>();
-        for (TrackUpsertRequest track : tracks) {
-            String normalized = track.name().trim().toLowerCase(Locale.ROOT);
-            if (!trackNames.add(normalized)) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Track names must be unique within the event setup");
-            }
-        }
+        Set<String> trackKeys = new HashSet<>();
+        List<EventStructureConfigDto.TrackConfigDto> normalizedTracks = new ArrayList<>();
 
-        Set<Integer> roundOrders = new HashSet<>();
-        for (RoundUpsertRequest round : rounds) {
-            validateRoundValues(round);
-            validateSubmissionDeadlineWithinEvent(startDate, endDate, round.submissionDeadline());
-            if (!roundOrders.add(round.roundOrder())) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Round order must be unique within the event setup");
+        for (int index = 0; index < tracks.size(); index += 1) {
+            EventStructureConfigDto.TrackConfigDto track = tracks.get(index);
+            String trackName = requireTrimmedValue(track.name(), "Track name is required");
+            String trackKey = normalizeKey(track.trackKey(), trackName, "track", index + 1);
+
+            if (!trackNames.add(trackName.toLowerCase(Locale.ROOT))) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " cannot contain duplicate track names");
             }
-        }
-        List<Integer> sortedOrders = rounds.stream()
-                .map(RoundUpsertRequest::roundOrder)
-                .sorted()
-                .toList();
-        for (int index = 0; index < sortedOrders.size(); index += 1) {
-            int expectedOrder = index + 1;
-            if (sortedOrders.get(index) != expectedOrder) {
-                throw new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "Round order must start at 1 and remain consecutive without gaps"
-                );
+            if (!trackKeys.add(trackKey)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " contains duplicate track keys");
             }
+
+            normalizedTracks.add(new EventStructureConfigDto.TrackConfigDto(
+                    trackKey,
+                    trackName,
+                    track.description() == null ? null : track.description().trim()
+            ));
         }
+        return normalizedTracks;
     }
 
-    private void validateRoundValues(RoundUpsertRequest request) {
+    private List<EventStructureConfigDto.RoundStageConfigDto> normalizeRounds(
+            List<EventStructureConfigDto.RoundStageConfigDto> rounds,
+            LocalDate competitionStartDate,
+            LocalDate competitionEndDate,
+            SemesterRef semester) {
+        if (rounds == null || rounds.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " must include at least one round");
+        }
+
+        List<EventStructureConfigDto.RoundStageConfigDto> orderedRounds = rounds.stream()
+                .sorted(Comparator.comparingInt(round -> round.roundOrder() == null ? Integer.MAX_VALUE : round.roundOrder()))
+                .toList();
+
+        List<EventStructureConfigDto.RoundStageConfigDto> normalizedRounds = new ArrayList<>();
+        Set<String> roundKeys = new HashSet<>();
+        int finalRoundCount = 0;
+
+        for (int index = 0; index < orderedRounds.size(); index += 1) {
+            EventStructureConfigDto.RoundStageConfigDto round = orderedRounds.get(index);
+            int expectedOrder = index + 1;
+            if (round.roundOrder() == null || round.roundOrder() != expectedOrder) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " round order must start at 1 and remain consecutive");
+            }
+
+            String roundName = requireTrimmedValue(round.roundName(), "Round name is required");
+            String roundKey = normalizeKey(round.roundKey(), roundName, "round", index + 1);
+            if (!roundKeys.add(roundKey)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " contains duplicate round keys");
+            }
+
+            LocalDate roundStartDate = requireDateWithinRange(
+                    round.startDate(),
+                    competitionStartDate,
+                    competitionEndDate,
+                    roundName + " start date must stay inside the semester competition range"
+            );
+            LocalDate roundEndDate = requireDateWithinRange(
+                    round.endDate(),
+                    competitionStartDate,
+                    competitionEndDate,
+                    roundName + " end date must stay inside the semester competition range"
+            );
+            if (roundStartDate.isAfter(roundEndDate)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, roundName + " start date must be before or equal to end date");
+            }
+
+            if (index > 0) {
+                EventStructureConfigDto.RoundStageConfigDto previousNormalizedRound = normalizedRounds.get(index - 1);
+                if (!roundStartDate.isAfter(previousNormalizedRound.endDate())) {
+                    throw new ApiException(
+                            HttpStatus.BAD_REQUEST,
+                            roundName + " must start after " + previousNormalizedRound.roundName() + " ends"
+                    );
+                }
+                if (!roundEndDate.isAfter(previousNormalizedRound.endDate())) {
+                    throw new ApiException(
+                            HttpStatus.BAD_REQUEST,
+                            roundName + " must end after " + previousNormalizedRound.roundName() + " ends"
+                    );
+                }
+            }
+
+            boolean finalRound = Boolean.TRUE.equals(round.finalRound());
+            if (finalRound) {
+                finalRoundCount += 1;
+                if (index != orderedRounds.size() - 1) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "The final round must be the last round by order");
+                }
+            }
+
+            normalizedRounds.add(new EventStructureConfigDto.RoundStageConfigDto(
+                    roundKey,
+                    roundName,
+                    expectedOrder,
+                    roundStartDate,
+                    roundEndDate,
+                    finalRound
+            ));
+        }
+
+        if (finalRoundCount != 1) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " must have exactly one final round");
+        }
+
+        return normalizedRounds;
+    }
+
+    private List<EventStructureConfigDto.PromotionRuleDto> normalizePromotionRules(
+            List<EventStructureConfigDto.PromotionRuleDto> rules,
+            Map<String, EventStructureConfigDto.TrackConfigDto> tracksByKey,
+            Map<String, EventStructureConfigDto.RoundStageConfigDto> roundsByKey,
+            SemesterRef semester) {
+        if (rules == null || rules.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, semesterLabel(semester) + " must include promotion rules");
+        }
+
+        Map<String, EventStructureConfigDto.RoundStageConfigDto> nonFinalRounds = roundsByKey.values().stream()
+                .filter(round -> !Boolean.TRUE.equals(round.finalRound()))
+                .collect(Collectors.toMap(
+                        EventStructureConfigDto.RoundStageConfigDto::roundKey,
+                        round -> round,
+                        (left, right) -> left,
+                        LinkedHashMap::new
+                ));
+
+        Set<String> dedupe = new HashSet<>();
+        List<EventStructureConfigDto.PromotionRuleDto> normalizedRules = new ArrayList<>();
+
+        for (EventStructureConfigDto.PromotionRuleDto rule : rules) {
+            String trackKey = requireTrimmedValue(rule.trackKey(), "Track key is required for promotion rules").toLowerCase(Locale.ROOT);
+            String fromRoundKey = requireTrimmedValue(rule.fromRoundKey(), "From round is required").toLowerCase(Locale.ROOT);
+            String toRoundKey = requireTrimmedValue(rule.toRoundKey(), "To round is required").toLowerCase(Locale.ROOT);
+            Integer topN = rule.topN();
+
+            if (!tracksByKey.containsKey(trackKey)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Promotion rule references an unknown track");
+            }
+            if (!roundsByKey.containsKey(fromRoundKey) || !roundsByKey.containsKey(toRoundKey)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Promotion rule references an unknown round");
+            }
+            EventStructureConfigDto.RoundStageConfigDto fromRound = roundsByKey.get(fromRoundKey);
+            EventStructureConfigDto.RoundStageConfigDto toRound = roundsByKey.get(toRoundKey);
+            if (Boolean.TRUE.equals(fromRound.finalRound())) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "The final round cannot promote to another round");
+            }
+            if (fromRound.roundOrder() >= toRound.roundOrder()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Promotion rules must advance from an earlier round to a later round");
+            }
+            if (toRound.roundOrder() != fromRound.roundOrder() + 1) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Promotion rules must point to the next round in sequence");
+            }
+            if (topN == null || topN < 1) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Top N must be greater than 0");
+            }
+
+            String ruleKey = trackKey + "::" + fromRoundKey + "::" + toRoundKey;
+            if (!dedupe.add(ruleKey)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Duplicate promotion rule detected");
+            }
+
+            normalizedRules.add(new EventStructureConfigDto.PromotionRuleDto(trackKey, fromRoundKey, toRoundKey, topN));
+        }
+
+        for (String trackKey : tracksByKey.keySet()) {
+            for (String roundKey : nonFinalRounds.keySet()) {
+                long matchingRules = normalizedRules.stream()
+                        .filter(rule -> rule.trackKey().equals(trackKey) && rule.fromRoundKey().equals(roundKey))
+                        .count();
+                if (matchingRules != 1) {
+                    throw new ApiException(
+                            HttpStatus.BAD_REQUEST,
+                            semesterLabel(semester) + " must define exactly one promotion rule for every track and every non-final round"
+                    );
+                }
+            }
+        }
+
+        return normalizedRules;
+    }
+
+    private List<EventStructureConfigDto.AwardConfigDto> normalizeAwards(List<EventStructureConfigDto.AwardConfigDto> awards,
+                                                                         String emptyMessage) {
+        if (awards == null || awards.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, emptyMessage);
+        }
+
+        Set<String> names = new HashSet<>();
+        List<EventStructureConfigDto.AwardConfigDto> normalizedAwards = new ArrayList<>();
+        for (EventStructureConfigDto.AwardConfigDto award : awards) {
+            String awardName = requireTrimmedValue(award.awardName(), "Award name is required");
+            if (award.quantity() == null || award.quantity() < 1) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Award quantity must be at least 1");
+            }
+            if (!names.add(awardName.toLowerCase(Locale.ROOT))) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Award names must be unique inside the same list");
+            }
+            normalizedAwards.add(new EventStructureConfigDto.AwardConfigDto(awardName, award.quantity()));
+        }
+        return normalizedAwards;
+    }
+
+    private void validateLegacyRoundValues(RoundUpsertRequest request) {
         if (request.roundOrder() == null || request.roundOrder() < 1) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Round order must be at least 1");
         }
@@ -560,8 +827,6 @@ public class EventManagementService {
             return;
         }
 
-        // Release the current slot first so the event/order unique constraint never sees
-        // two rounds sharing the same value during the intermediate shift.
         movingRound.setRoundOrder(0);
         roundRepository.saveAndFlush(movingRound);
 
@@ -601,7 +866,7 @@ public class EventManagementService {
     }
 
     private void validateEventDateRange(LocalDate startDate, LocalDate endDate) {
-        if (!endDate.isAfter(startDate)) {
+        if (startDate == null || endDate == null || !endDate.isAfter(startDate)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "End date must be after start date");
         }
     }
@@ -624,100 +889,23 @@ public class EventManagementService {
         }
     }
 
-    private void syncTracks(Integer eventId, List<TrackConfigurationRequest> requests) {
-        List<TrackEntity> existingTracks = trackRepository.findByEventIdOrderByTrackIdAsc(eventId);
-        Map<Integer, TrackEntity> existingById = existingTracks.stream()
-                .collect(java.util.stream.Collectors.toMap(TrackEntity::getTrackId, track -> track));
-        Set<Integer> requestedIds = new HashSet<>();
-
-        for (TrackConfigurationRequest request : requests) {
-            if (request.trackId() != null) {
-                TrackEntity existing = existingById.get(request.trackId());
-                if (existing == null) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST, "Track does not belong to this event");
-                }
-                existing.setName(request.name().trim());
-                trackRepository.save(existing);
-                requestedIds.add(existing.getTrackId());
-            } else {
-                TrackEntity created = new TrackEntity();
-                created.setEventId(eventId);
-                created.setName(request.name().trim());
-                trackRepository.save(created);
-            }
-        }
-
-        List<TrackEntity> tracksToDelete = existingTracks.stream()
-                .filter(track -> !requestedIds.contains(track.getTrackId()))
-                .toList();
-        for (TrackEntity track : tracksToDelete) {
-            requireTrackHasNoTeams(track.getTrackId());
-            trackRepository.delete(track);
-        }
-    }
-
-    private void syncRounds(Integer eventId, List<RoundConfigurationRequest> requests) {
-        List<RoundEntity> existingRounds = roundRepository.findByEventIdOrderByRoundOrderAsc(eventId);
-        Map<Integer, RoundEntity> existingById = existingRounds.stream()
-                .collect(java.util.stream.Collectors.toMap(RoundEntity::getRoundId, round -> round));
-        Set<Integer> requestedIds = new HashSet<>();
-
-        int tempOrder = requests.size() + existingRounds.size() + 10;
-        for (RoundEntity round : existingRounds) {
-            round.setRoundOrder(tempOrder++);
-            roundRepository.save(round);
-        }
-        if (!existingRounds.isEmpty()) {
-            roundRepository.flush();
-        }
-
-        for (RoundConfigurationRequest request : requests) {
-            RoundEntity round;
-            if (request.roundId() != null) {
-                round = existingById.get(request.roundId());
-                if (round == null) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST, "Round does not belong to this event");
-                }
-                requestedIds.add(round.getRoundId());
-            } else {
-                round = new RoundEntity();
-                round.setEventId(eventId);
-                round.setScoreLocked(false);
-            }
-
-            round.setRoundName(request.roundName().trim());
-            round.setRoundOrder(request.roundOrder());
-            round.setSubmissionDeadline(request.submissionDeadline());
-            round.setPromotionRuleTopN(request.promotionRuleTopN());
-            if (round.getScoreLocked() == null) {
-                round.setScoreLocked(false);
-            }
-            roundRepository.save(round);
-        }
-        roundRepository.flush();
-
-        List<RoundEntity> roundsToDelete = existingRounds.stream()
-                .filter(round -> !requestedIds.contains(round.getRoundId()))
-                .toList();
-        for (RoundEntity round : roundsToDelete) {
-            roundRepository.delete(round);
-        }
-    }
-
     private void applyEventRequest(HackathonEventEntity event,
                                    EventUpsertRequest request,
-                                   String semester,
+                                   String seasonSummary,
                                    boolean creating) {
         EventStatus nextStatus = EventStatus.from(request.status());
-        if (creating && nextStatus != EventStatus.DRAFT) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "New event must start in Draft status");
+        if (creating && nextStatus != EventStatus.DRAFT && nextStatus != EventStatus.CONFIGURED) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "New event must start in Draft or Configured status");
         }
         if (!creating) {
             validateStatusTransition(event, nextStatus);
         }
+        if (!creating && nextStatus == EventStatus.CONFIGURED) {
+            validateConfiguredReadiness(event.getEventId());
+        }
 
-        event.setName(request.name().trim());
-        event.setSemester(semester);
+        event.setName(requireTrimmedValue(request.name(), "Event name is required"));
+        event.setSeason(seasonSummary);
         event.setYear(request.year());
         event.setStartDate(request.startDate());
         event.setEndDate(request.endDate());
@@ -727,12 +915,12 @@ public class EventManagementService {
 
     private void applyEventRequestWithoutConfiguredReadiness(HackathonEventEntity event,
                                                              EventUpsertRequest request,
-                                                             String semester) {
+                                                             String seasonSummary) {
         EventStatus nextStatus = EventStatus.from(request.status());
         validateStatusTransition(event, nextStatus);
 
-        event.setName(request.name().trim());
-        event.setSemester(semester);
+        event.setName(requireTrimmedValue(request.name(), "Event name is required"));
+        event.setSeason(seasonSummary);
         event.setYear(request.year());
         event.setStartDate(request.startDate());
         event.setEndDate(request.endDate());
@@ -740,25 +928,427 @@ public class EventManagementService {
         event.setDescription(request.description() == null ? null : request.description().trim());
     }
 
-    private String normalizeSemester(String rawSemester) {
-        String normalizedSemesterKey = rawSemester.trim().toUpperCase(Locale.ROOT);
-        if (!ALLOWED_SEMESTERS.containsKey(normalizedSemesterKey)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "semester must be one of: Spring, Summer, Fall");
+    private String normalizeLegacySeasonSummary(String rawSeason) {
+        String value = requireTrimmedValue(rawSeason, "Season is required");
+        if (value.length() > 40) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Season summary is too long");
         }
-        return ALLOWED_SEMESTERS.get(normalizedSemesterKey);
+        return value;
     }
 
-    private void ensureSemesterYearUnique(Integer year, String semester, Integer currentEventId) {
-        boolean exists = currentEventId == null
-                ? eventRepository.existsByYearAndSemesterIgnoreCase(year, semester)
-                : eventRepository.existsByYearAndSemesterIgnoreCaseAndEventIdNot(year, semester, currentEventId);
-        if (exists) {
-            throw new ApiException(HttpStatus.CONFLICT, "An event for this semester and year already exists");
+    private String normalizeSeasonName(String rawSeason) {
+        String value = requireTrimmedValue(rawSeason, "Season name is required");
+        return SEASON_ORDER.stream()
+                .filter(allowed -> allowed.equalsIgnoreCase(value))
+                .findFirst()
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "Season must be one of: Spring, Summer, Fall"
+                ));
+    }
+
+    private int seasonIndex(String seasonName) {
+        int index = SEASON_ORDER.indexOf(seasonName);
+        return index >= 0 ? index : Integer.MAX_VALUE;
+    }
+
+    private Integer requirePositiveYear(Integer year) {
+        if (year == null || year < 2020 || year > 2100) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Semester year must be between 2020 and 2100");
         }
+        return year;
+    }
+
+    private LocalDate getSemesterStartDate(SemesterRef semester) {
+        return switch (semester.season()) {
+            case "Spring" -> LocalDate.of(semester.year(), 1, 1);
+            case "Summer" -> LocalDate.of(semester.year(), 5, 1);
+            case "Fall" -> LocalDate.of(semester.year(), 9, 1);
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "Unsupported semester");
+        };
+    }
+
+    private LocalDate getSemesterEndDate(SemesterRef semester) {
+        return switch (semester.season()) {
+            case "Spring" -> LocalDate.of(semester.year(), 4, 30);
+            case "Summer" -> LocalDate.of(semester.year(), 8, 31);
+            case "Fall" -> LocalDate.of(semester.year(), 12, 31);
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "Unsupported semester");
+        };
+    }
+
+    private boolean isNextSemester(SemesterRef previous, SemesterRef current) {
+        int previousIndex = seasonIndex(previous.season());
+        int currentIndex = seasonIndex(current.season());
+        if (previousIndex == SEASON_ORDER.size() - 1) {
+            return current.year() == previous.year() + 1 && currentIndex == 0;
+        }
+        return current.year().equals(previous.year()) && currentIndex == previousIndex + 1;
+    }
+
+    private String semesterLabel(SemesterRef semester) {
+        return semester.season() + " " + semester.year();
+    }
+
+    private SemesterRef toSemesterRef(EventStructureConfigDto.SeasonConfigDto season) {
+        return new SemesterRef(season.season(), season.year());
+    }
+
+    private LocalDate requireDateWithinSemester(LocalDate value,
+                                                LocalDate allowedStart,
+                                                LocalDate allowedEnd,
+                                                String errorMessage) {
+        return requireDateWithinRange(value, allowedStart, allowedEnd, errorMessage);
+    }
+
+    private LocalDate requireDateWithinRange(LocalDate value,
+                                             LocalDate rangeStart,
+                                             LocalDate rangeEnd,
+                                             String errorMessage) {
+        if (value == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, errorMessage);
+        }
+        if (value.isBefore(rangeStart) || value.isAfter(rangeEnd)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, errorMessage);
+        }
+        return value;
+    }
+
+    private String buildSeasonSummary(EventStructureConfigDto configuration) {
+        return configuration.seasons().stream()
+                .map(EventStructureConfigDto.SeasonConfigDto::season)
+                .sorted(Comparator.comparingInt(this::seasonIndex))
+                .collect(Collectors.joining("+"));
+    }
+
+    private String normalizeTrackSelectionMode(String rawMode) {
+        String normalized = requireTrimmedValue(rawMode, "Track selection mode is required")
+                .toUpperCase(Locale.ROOT);
+        if (!ALLOWED_TRACK_SELECTION_MODES.contains(normalized)) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "Track selection mode must be TEAM_SELECT or SYSTEM_RANDOM"
+            );
+        }
+        return normalized;
+    }
+
+    private String normalizeOptionalTrackSelectionMode(String rawMode) {
+        if (rawMode == null || rawMode.isBlank()) {
+            return "TEAM_SELECT";
+        }
+        return normalizeTrackSelectionMode(rawMode);
+    }
+
+    private String normalizeOverallGrandFinalEligibility(String rawEligibility) {
+        String normalized = requireTrimmedValue(rawEligibility, "Grand final eligibility is required")
+                .toUpperCase(Locale.ROOT);
+        if (!ALLOWED_OVERALL_ELIGIBILITY.contains(normalized)) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "Grand final eligibility must be one of: CHAMPION_ONLY, TOP_3_EACH_SEMESTER, ALL_AWARDED_TEAMS, CUSTOM_RULE"
+            );
+        }
+        return normalized;
+    }
+
+    private String normalizeOptionalOverallGrandFinalEligibility(String rawEligibility) {
+        if (rawEligibility == null || rawEligibility.isBlank()) {
+            return "CHAMPION_ONLY";
+        }
+        return normalizeOverallGrandFinalEligibility(rawEligibility);
+    }
+
+    private String normalizeOverallGrandFinalMethod(String rawMethod) {
+        String normalized = requireTrimmedValue(rawMethod, "Grand final ranking method is required")
+                .toUpperCase(Locale.ROOT);
+        if (!ALLOWED_OVERALL_METHODS.contains(normalized)) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "Grand final ranking method must be one of: SUM_SCORES_ACROSS_SEMESTERS, ADDITIONAL_GRAND_FINAL_COMPETITION"
+            );
+        }
+        return normalized;
+    }
+
+    private String normalizeOptionalOverallGrandFinalMethod(String rawMethod) {
+        if (rawMethod == null || rawMethod.isBlank()) {
+            return "SUM_SCORES_ACROSS_SEMESTERS";
+        }
+        return normalizeOverallGrandFinalMethod(rawMethod);
+    }
+
+    private String normalizeSeasonFinalRankingMode(String rawMode) {
+        String normalized = requireTrimmedValue(rawMode, "Final round ranking mode is required")
+                .toUpperCase(Locale.ROOT);
+        if (!ALLOWED_FINAL_RANKING_MODES.contains(normalized)) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "Final round ranking mode must be RANK_BY_SCORE or ADDITIONAL_COMPETITION"
+            );
+        }
+        return normalized;
+    }
+
+    private String normalizeOptionalSeasonFinalRankingMode(String rawMode) {
+        if (rawMode == null || rawMode.isBlank()) {
+            return "RANK_BY_SCORE";
+        }
+        return normalizeSeasonFinalRankingMode(rawMode);
+    }
+
+    private List<EventStructureConfigDto.TrackConfigDto> normalizeDraftTracks(List<EventStructureConfigDto.TrackConfigDto> tracks) {
+        if (tracks == null) {
+            return List.of();
+        }
+        return tracks.stream()
+                .filter(Objects::nonNull)
+                .map(track -> new EventStructureConfigDto.TrackConfigDto(
+                        track.trackKey(),
+                        track.name(),
+                        track.description()
+                ))
+                .toList();
+    }
+
+    private List<EventStructureConfigDto.RoundStageConfigDto> normalizeDraftRounds(List<EventStructureConfigDto.RoundStageConfigDto> rounds) {
+        if (rounds == null) {
+            return List.of();
+        }
+        return rounds.stream()
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparingInt(round -> round.roundOrder() == null ? Integer.MAX_VALUE : round.roundOrder()))
+                .toList();
+    }
+
+    private List<EventStructureConfigDto.PromotionRuleDto> normalizeDraftPromotionRules(List<EventStructureConfigDto.PromotionRuleDto> rules) {
+        if (rules == null) {
+            return List.of();
+        }
+        return rules.stream()
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private List<EventStructureConfigDto.AwardConfigDto> normalizeDraftAwards(List<EventStructureConfigDto.AwardConfigDto> awards) {
+        if (awards == null) {
+            return List.of();
+        }
+        return awards.stream()
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private List<String> normalizeDraftActivities(List<String> activities) {
+        if (activities == null) {
+            return List.of();
+        }
+        return activities.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .distinct()
+                .toList();
+    }
+
+    private List<String> normalizeActivities(List<String> activities, String emptyMessage) {
+        if (activities == null || activities.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, emptyMessage);
+        }
+        List<String> normalized = activities.stream()
+                .map(activity -> requireTrimmedValue(activity, "Activity name is required"))
+                .distinct()
+                .toList();
+        if (normalized.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, emptyMessage);
+        }
+        return normalized;
+    }
+
+    private Integer estimateEligibleFinalTeams(List<EventStructureConfigDto.RoundStageConfigDto> rounds,
+                                               List<EventStructureConfigDto.PromotionRuleDto> promotionRules) {
+        EventStructureConfigDto.RoundStageConfigDto finalRound = rounds.stream()
+                .filter(round -> Boolean.TRUE.equals(round.finalRound()))
+                .findFirst()
+                .orElse(null);
+        if (finalRound == null) {
+            return null;
+        }
+        int eligibleTeams = promotionRules.stream()
+                .filter(rule -> rule.toRoundKey().equals(finalRound.roundKey()))
+                .mapToInt(EventStructureConfigDto.PromotionRuleDto::topN)
+                .sum();
+        return eligibleTeams > 0 ? eligibleTeams : null;
+    }
+
+    private List<SemesterRef> normalizeSemesterRange(String rawStartSemester,
+                                                     String rawEndSemester,
+                                                     List<EventStructureConfigDto.SeasonConfigDto> seasons) {
+        if (rawStartSemester != null && !rawStartSemester.isBlank()
+                && rawEndSemester != null && !rawEndSemester.isBlank()) {
+            SemesterRef start = parseSemesterLabel(rawStartSemester, "Start semester is required");
+            SemesterRef end = parseSemesterLabel(rawEndSemester, "End semester is required");
+            if (compareSemesterRefs(start, end) > 0) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "End semester must not be before start semester");
+            }
+            return buildConsecutiveSemesterRange(start, end);
+        }
+
+        if (seasons == null || seasons.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Event must include at least one semester");
+        }
+
+        List<SemesterRef> orderedSemesters = seasons.stream()
+                .filter(Objects::nonNull)
+                .map(season -> new SemesterRef(
+                        normalizeSeasonName(season.season()),
+                        requirePositiveYear(season.year())
+                ))
+                .distinct()
+                .sorted(this::compareSemesterRefs)
+                .toList();
+
+        if (orderedSemesters.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Event must include at least one semester");
+        }
+
+        for (int index = 1; index < orderedSemesters.size(); index += 1) {
+            if (!isNextSemester(orderedSemesters.get(index - 1), orderedSemesters.get(index))) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Selected semesters must be consecutive from start semester to end semester");
+            }
+        }
+        return orderedSemesters;
+    }
+
+    private SemesterRef parseSemesterLabel(String rawValue, String errorMessage) {
+        String value = requireTrimmedValue(rawValue, errorMessage);
+        String[] parts = value.split("\\s+");
+        if (parts.length != 2) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, errorMessage);
+        }
+        String season = normalizeSeasonName(parts[0]);
+        Integer year;
+        try {
+            year = Integer.valueOf(parts[1]);
+        } catch (NumberFormatException exception) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, errorMessage);
+        }
+        return new SemesterRef(season, requirePositiveYear(year));
+    }
+
+    private SemesterRef safeParseSemesterLabel(String rawValue) {
+        try {
+            return parseSemesterLabel(rawValue, "Semester value is invalid");
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private int compareSemesterRefs(SemesterRef left, SemesterRef right) {
+        if (!Objects.equals(left.year(), right.year())) {
+            return left.year().compareTo(right.year());
+        }
+        return Integer.compare(seasonIndex(left.season()), seasonIndex(right.season()));
+    }
+
+    private List<SemesterRef> buildConsecutiveSemesterRange(SemesterRef start, SemesterRef end) {
+        List<SemesterRef> semesters = new ArrayList<>();
+        SemesterRef current = start;
+        while (compareSemesterRefs(current, end) <= 0) {
+            semesters.add(current);
+            int currentIndex = seasonIndex(current.season());
+            current = currentIndex == SEASON_ORDER.size() - 1
+                    ? new SemesterRef(SEASON_ORDER.get(0), current.year() + 1)
+                    : new SemesterRef(SEASON_ORDER.get(currentIndex + 1), current.year());
+        }
+        return semesters;
+    }
+
+    private void validateNoSemesterOverlap(EventStructureConfigDto configuration, Integer ignoredEventId) {
+        SemesterRange candidateRange = new SemesterRange(
+                parseSemesterLabel(configuration.startSemester(), "Start semester is required"),
+                parseSemesterLabel(configuration.endSemester(), "End semester is required")
+        );
+
+        for (HackathonEventEntity existingEvent : eventRepository.findAll()) {
+            if (ignoredEventId != null && ignoredEventId.equals(existingEvent.getEventId())) {
+                continue;
+            }
+            SemesterRange existingRange = resolveSemesterRange(existingEvent);
+            if (existingRange != null && semesterRangesOverlap(candidateRange, existingRange)) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "The selected semester range overlaps with existing event "
+                                + existingEvent.getName()
+                                + " ("
+                                + semesterLabel(existingRange.start())
+                                + " -> "
+                                + semesterLabel(existingRange.end())
+                                + ")"
+                );
+            }
+        }
+    }
+
+    private SemesterRange resolveSemesterRange(HackathonEventEntity event) {
+        try {
+            EventStructureConfigDto configuration = resolveConfiguration(event);
+            List<SemesterRef> semesters = normalizeSemesterRange(
+                    configuration.startSemester(),
+                    configuration.endSemester(),
+                    configuration.seasons()
+            );
+            return new SemesterRange(semesters.get(0), semesters.get(semesters.size() - 1));
+        } catch (Exception ignored) {
+            if (event.getSeason() == null || event.getYear() == null) {
+                return null;
+            }
+            List<SemesterRef> legacySemesters = new ArrayList<>();
+            for (String token : event.getSeason().split("\\+")) {
+                String normalized = token == null ? "" : token.trim();
+                if (normalized.isBlank()) {
+                    continue;
+                }
+                try {
+                    legacySemesters.add(new SemesterRef(normalizeSeasonName(normalized), requirePositiveYear(event.getYear())));
+                } catch (ApiException ignoredApiException) {
+                    // Ignore invalid legacy season tokens and fall back to the remaining ones.
+                }
+            }
+            if (legacySemesters.isEmpty()) {
+                return null;
+            }
+            legacySemesters.sort(this::compareSemesterRefs);
+            return new SemesterRange(legacySemesters.get(0), legacySemesters.get(legacySemesters.size() - 1));
+        }
+    }
+
+    private boolean semesterRangesOverlap(SemesterRange left, SemesterRange right) {
+        return compareSemesterRefs(left.start(), right.end()) <= 0
+                && compareSemesterRefs(right.start(), left.end()) <= 0;
+    }
+
+    private String normalizeKey(String rawKey, String fallbackText, String prefix, int index) {
+        String source = rawKey == null || rawKey.isBlank() ? fallbackText : rawKey;
+        String normalized = KEY_SANITIZER.matcher(source.trim().toLowerCase(Locale.ROOT))
+                .replaceAll("-")
+                .replaceAll("^-+", "")
+                .replaceAll("-+$", "");
+        if (normalized.isBlank()) {
+            normalized = prefix + "-" + index;
+        }
+        return normalized;
+    }
+
+    private String requireTrimmedValue(String value, String message) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, message);
+        }
+        return value.trim();
     }
 
     private void validateStatusTransition(HackathonEventEntity event, EventStatus nextStatus) {
-        EventStatus currentStatus = safeStatus(event.getStatus());
+        EventStatus currentStatus = EventStatus.from(event.getStatus());
         if (currentStatus == nextStatus) {
             return;
         }
@@ -766,27 +1356,31 @@ public class EventManagementService {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "Cannot change event status from " + currentStatus.getDbValue() + " to " + nextStatus.getDbValue());
         }
-        if (currentStatus == EventStatus.DRAFT && nextStatus == EventStatus.ONGOING) {
+        if (nextStatus == EventStatus.CANCELLED) {
+            if (Set.of(EventStatus.DRAFT, EventStatus.CONFIGURED, EventStatus.REGISTRATION_OPEN, EventStatus.ONGOING)
+                    .contains(currentStatus)) {
+                return;
+            }
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Cannot change event status from " + currentStatus.getDbValue() + " to Cancelled");
+        }
+
+        if (nextStatus.ordinal() != currentStatus.ordinal() + 1) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Cannot change event status from " + currentStatus.getDbValue() + " to " + nextStatus.getDbValue());
+        }
+        if (nextStatus == EventStatus.ONGOING) {
             validateTeamsReadyForEvent(event.getEventId());
-            return;
         }
-        if (currentStatus == EventStatus.ONGOING && nextStatus == EventStatus.ENDED) {
-            return;
-        }
-        throw new ApiException(HttpStatus.BAD_REQUEST,
-                "Cannot change event status from " + currentStatus.getDbValue() + " to " + nextStatus.getDbValue());
     }
 
     private void validateConfiguredReadiness(Integer eventId) {
         if (eventId == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Event must be saved before configuring");
         }
-        if (trackRepository.findByEventIdOrderByTrackIdAsc(eventId).isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Configured event requires at least one track");
-        }
-        if (roundRepository.findByEventIdOrderByRoundOrderAsc(eventId).isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Configured event requires at least one round");
-        }
+        HackathonEventEntity event = getEventOrThrow(eventId);
+        EventStructureConfigDto configuration = resolveConfiguration(event);
+        normalizeAndValidateConfiguration(configuration, event.getStartDate(), event.getEndDate());
     }
 
     private void validateTeamsReadyForEvent(Integer eventId) {
@@ -803,547 +1397,124 @@ public class EventManagementService {
         }
     }
 
-    private void ensureDraftEditable(HackathonEventEntity event) {
-        EventStatus status = safeStatus(event.getStatus());
-        if (status != EventStatus.DRAFT) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Published events are locked and cannot be edited");
-        }
-    }
-
-    private HackathonEventEntity synchronizeLifecycleStatus(HackathonEventEntity event) {
-        EventStatus currentStatus = safeStatus(event.getStatus());
-        EventStatus resolvedStatus = resolveLifecycleStatus(event);
-        if (resolvedStatus != currentStatus) {
-            event.setStatus(resolvedStatus.getDbValue());
-            eventRepository.save(event);
-        }
-        return event;
-    }
-
-    private EventStatus resolveLifecycleStatus(HackathonEventEntity event) {
-        EventStatus currentStatus = safeStatus(event.getStatus());
-        if (currentStatus == EventStatus.DRAFT) {
-            return EventStatus.DRAFT;
-        }
-        if (event.getCompetitionEndAt() != null && !event.getCompetitionEndAt().isAfter(LocalDateTime.now())) {
-            return EventStatus.ENDED;
-        }
-        return EventStatus.ONGOING;
-    }
-
-    private EventDraftSnapshot sanitizeWizardRequest(EventWizardRequest request) {
-        List<EventWizardTrackRequest> sanitizedTracks = request == null || request.tracks() == null
-                ? Collections.emptyList()
-                : request.tracks().stream()
-                .filter(track -> track != null && track.name() != null && !track.name().trim().isBlank())
-                .map(track -> new EventWizardTrackRequest(track.trackId(), track.name().trim()))
-                .toList();
-
-        List<EventWizardRoundRequest> sanitizedQualifyingRounds = request == null || request.qualifyingRounds() == null
-                ? Collections.emptyList()
-                : request.qualifyingRounds().stream()
-                .filter(round -> round != null
-                        && round.roundName() != null
-                        && !round.roundName().trim().isBlank())
-                .map(round -> new EventWizardRoundRequest(
-                        round.roundId(),
-                        round.roundName().trim(),
-                        round.roundOrder(),
-                        round.submissionDeadline(),
-                        round.promotionRuleTopN(),
-                        false,
-                        sanitizeRoundCriteria(round.criteria())
-                ))
-                .toList();
-
-        EventWizardRoundRequest sanitizedFinalRound = request == null || request.finalRound() == null
-                || request.finalRound().roundName() == null
-                || request.finalRound().roundName().trim().isBlank()
-                ? null
-                : new EventWizardRoundRequest(
-                        request.finalRound().roundId(),
-                        normalizeFinalRoundName(request.finalRound().roundName()),
-                        request.finalRound().roundOrder(),
-                        request.finalRound().submissionDeadline(),
-                        null,
-                        true,
-                        sanitizeRoundCriteria(request.finalRound().criteria())
-                );
-
-        List<EventWizardAwardRequest> sanitizedAwards = request == null || request.awards() == null
-                ? Collections.emptyList()
-                : request.awards().stream()
-                .filter(award -> award != null && award.awardName() != null && !award.awardName().trim().isBlank())
-                .map(award -> new EventWizardAwardRequest(award.awardName().trim(), award.quantity()))
-                .toList();
-
-        return new EventDraftSnapshot(
-                request == null || request.name() == null ? "" : request.name().trim(),
-                request == null || request.semester() == null ? "" : request.semester().trim(),
-                request == null ? null : request.year(),
-                request == null || request.description() == null ? null : request.description().trim(),
-                request == null ? null : request.registrationStartAt(),
-                request == null ? null : request.registrationEndAt(),
-                request == null ? null : request.competitionStartAt(),
-                request == null ? null : request.competitionEndAt(),
-                request == null || request.trackSelectionMode() == null ? "TEAM_SELECT" : request.trackSelectionMode().trim(),
-                sanitizedTracks,
-                sanitizedQualifyingRounds,
-                sanitizedFinalRound,
-                request == null || request.rankingMethod() == null ? "SCORE_BASED" : request.rankingMethod().trim(),
-                sanitizedAwards
-        );
-    }
-
-    private void applyWizardSnapshot(HackathonEventEntity event, EventDraftSnapshot snapshot, String semester) {
-        event.setName(snapshot.name());
-        event.setSemester(semester);
-        event.setYear(snapshot.year());
-        event.setDescription(snapshot.description());
-        event.setRegistrationStartAt(snapshot.registrationStartAt());
-        event.setRegistrationEndAt(snapshot.registrationEndAt());
-        event.setCompetitionStartAt(snapshot.competitionStartAt());
-        event.setCompetitionEndAt(snapshot.competitionEndAt());
-        event.setTrackSelectionMode(snapshot.trackSelectionMode());
-        event.setRankingMethod(snapshot.rankingMethod());
-        event.setAwardsJson(writeAwards(snapshot.awards()));
-        event.setScoringCriteriaJson(null);
-        event.setStartDate(snapshot.competitionStartAt() == null ? null : snapshot.competitionStartAt().toLocalDate());
-        event.setEndDate(snapshot.competitionEndAt() == null ? null : snapshot.competitionEndAt().toLocalDate());
-    }
-
-    private void syncWizardTracks(Integer eventId, List<EventWizardTrackRequest> requests) {
-        List<TrackEntity> existingTracks = trackRepository.findByEventIdOrderByTrackIdAsc(eventId);
-        Map<Integer, TrackEntity> existingById = existingTracks.stream()
-                .collect(java.util.stream.Collectors.toMap(TrackEntity::getTrackId, track -> track));
-        Set<Integer> requestedIds = new HashSet<>();
-        Set<String> uniqueNames = new HashSet<>();
-
-        for (EventWizardTrackRequest request : requests) {
-            String normalized = request.name().trim().toLowerCase(Locale.ROOT);
-            if (!uniqueNames.add(normalized)) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Track names must be unique");
-            }
-
-            if (request.trackId() != null) {
-                TrackEntity existing = existingById.get(request.trackId());
-                if (existing == null) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST, "Track does not belong to this event");
-                }
-                existing.setName(request.name().trim());
-                trackRepository.save(existing);
-                requestedIds.add(existing.getTrackId());
-            } else {
-                TrackEntity created = new TrackEntity();
-                created.setEventId(eventId);
-                created.setName(request.name().trim());
-                TrackEntity savedTrack = trackRepository.save(created);
-                requestedIds.add(savedTrack.getTrackId());
-            }
-        }
-
-        for (TrackEntity existing : existingTracks) {
-            if (!requestedIds.contains(existing.getTrackId())) {
-                requireTrackHasNoTeams(existing.getTrackId());
-                trackRepository.delete(existing);
-            }
-        }
-        trackRepository.flush();
-    }
-
-    private void syncWizardRounds(Integer eventId,
-                                  List<EventWizardRoundRequest> qualifyingRounds,
-                                  EventWizardRoundRequest finalRound) {
-        List<EventWizardRoundRequest> desiredRounds = new ArrayList<>();
-        int order = 1;
-        for (EventWizardRoundRequest qualifyingRound : qualifyingRounds) {
-            desiredRounds.add(new EventWizardRoundRequest(
-                    qualifyingRound.roundId(),
-                    qualifyingRound.roundName(),
-                    order++,
-                    qualifyingRound.submissionDeadline(),
-                    qualifyingRound.promotionRuleTopN(),
-                    false,
-                    qualifyingRound.criteria()
-            ));
-        }
-        if (finalRound != null) {
-            desiredRounds.add(new EventWizardRoundRequest(
-                    finalRound.roundId(),
-                    normalizeFinalRoundName(finalRound.roundName()),
-                    order,
-                    finalRound.submissionDeadline(),
-                    null,
-                    true,
-                    finalRound.criteria()
-            ));
-        }
-
-        List<RoundEntity> existingRounds = roundRepository.findByEventIdOrderByRoundOrderAsc(eventId);
-        Map<Integer, RoundEntity> existingById = existingRounds.stream()
-                .collect(java.util.stream.Collectors.toMap(RoundEntity::getRoundId, round -> round));
-        Set<Integer> requestedIds = new HashSet<>();
-
-        int tempOrder = desiredRounds.size() + existingRounds.size() + 10;
-        for (RoundEntity existing : existingRounds) {
-            existing.setRoundOrder(tempOrder++);
-            roundRepository.save(existing);
-        }
-        if (!existingRounds.isEmpty()) {
-            roundRepository.flush();
-        }
-
-        for (EventWizardRoundRequest request : desiredRounds) {
-            RoundEntity round = request.roundId() == null ? null : existingById.get(request.roundId());
-            if (round == null) {
-                round = new RoundEntity();
-                round.setEventId(eventId);
-                round.setScoreLocked(false);
-            } else {
-                requestedIds.add(round.getRoundId());
-            }
-
-            round.setRoundName(request.roundName());
-            round.setRoundOrder(request.roundOrder());
-            round.setStartAt(request.submissionDeadline());
-            round.setEndAt(request.submissionDeadline());
-            round.setSubmissionDeadline(request.submissionDeadline());
-            round.setPromotionRuleTopN(Boolean.TRUE.equals(request.finalRound()) ? null : request.promotionRuleTopN());
-            round.setFinalRound(Boolean.TRUE.equals(request.finalRound()));
-            if (round.getScoreLocked() == null) {
-                round.setScoreLocked(false);
-            }
-            roundRepository.save(round);
-            syncRoundCriteria(round, request.criteria());
-        }
-        roundRepository.flush();
-
-        for (RoundEntity existing : existingRounds) {
-            if (!requestedIds.contains(existing.getRoundId())) {
-                scoringCriteriaRepository.deleteByRoundId(existing.getRoundId());
-                roundRepository.delete(existing);
-            }
-        }
-        roundRepository.flush();
-    }
-
-    private void validatePublishableEvent(HackathonEventEntity event,
-                                          List<TrackEntity> tracks,
-                                          List<RoundEntity> rounds) {
-        if (event.getName() == null || event.getName().isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Event name is required");
-        }
-        if (event.getSemester() == null || event.getYear() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Semester is required");
-        }
-        if (event.getRegistrationStartAt() == null || event.getRegistrationEndAt() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Registration dates are required");
-        }
-        if (event.getCompetitionStartAt() == null || event.getCompetitionEndAt() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Competition dates are required");
-        }
-        if (event.getRegistrationEndAt().isBefore(event.getRegistrationStartAt())) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Registration end must be after registration start");
-        }
-        if (event.getCompetitionEndAt().isBefore(event.getCompetitionStartAt())) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Competition end must be after competition start");
-        }
-        if (event.getCompetitionStartAt().isBefore(event.getRegistrationEndAt())) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Competition must start after registration ends");
-        }
-
-        validateEventDateInSemester(event.getSemester(), event.getYear(), event.getRegistrationStartAt(), "Registration start");
-        validateEventDateInSemester(event.getSemester(), event.getYear(), event.getRegistrationEndAt(), "Registration end");
-        validateEventDateInSemester(event.getSemester(), event.getYear(), event.getCompetitionStartAt(), "Competition start");
-        validateEventDateInSemester(event.getSemester(), event.getYear(), event.getCompetitionEndAt(), "Competition end");
-
-        if (tracks.isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "At least one track is required");
-        }
-
-        if (rounds.isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "At least one round is required");
-        }
-
-        List<RoundEntity> orderedRounds = rounds.stream()
-                .sorted(Comparator.comparing(RoundEntity::getRoundOrder))
-                .toList();
-
-        long finalRoundCount = orderedRounds.stream().filter(round -> Boolean.TRUE.equals(round.getFinalRound())).count();
-        if (finalRoundCount != 1) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Exactly one final round is required");
-        }
-
-        RoundEntity lastRound = orderedRounds.get(orderedRounds.size() - 1);
-        if (!Boolean.TRUE.equals(lastRound.getFinalRound())) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "The final round must be the last round");
-        }
-
-        int expectedOrder = 1;
-        LocalDateTime previousSubmissionDeadline = null;
-        for (RoundEntity round : orderedRounds) {
-            if (round.getRoundOrder() == null || round.getRoundOrder() != expectedOrder) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Round order must stay consecutive from 1");
-            }
-            if (round.getRoundName() == null || round.getRoundName().isBlank()) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Every round must have a name");
-            }
-            if (round.getSubmissionDeadline() == null) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Every round needs a submission deadline");
-            }
-            if (round.getSubmissionDeadline().isBefore(event.getCompetitionStartAt())
-                    || round.getSubmissionDeadline().isAfter(event.getCompetitionEndAt())) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Round submission deadlines must stay inside the competition window");
-            }
-            if (previousSubmissionDeadline != null && !round.getSubmissionDeadline().isAfter(previousSubmissionDeadline)) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Each next round must have a submission deadline after the previous round");
-            }
-            if (!Boolean.TRUE.equals(round.getFinalRound())
-                    && (round.getPromotionRuleTopN() == null || round.getPromotionRuleTopN() < 1)) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Each qualifying round needs a Top N value");
-            }
-            if (scoringCriteriaRepository.findByRoundIdOrderByCriteriaId(round.getRoundId()).isEmpty()) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Each round needs at least one scoring criterion");
-            }
-            previousSubmissionDeadline = round.getSubmissionDeadline();
-            expectedOrder += 1;
-        }
-
-        List<EventWizardAwardRequest> awards = readAwards(event.getAwardsJson());
-        if (awards.isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "At least one award is required");
-        }
-        for (EventWizardAwardRequest award : awards) {
-            if (award.awardName() == null || award.awardName().isBlank() || award.quantity() == null || award.quantity() < 1) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Each award needs a name and quantity greater than 0");
-            }
-        }
-
-    }
-
-    private void validateEventDateInSemester(String semester, Integer year, LocalDateTime value, String label) {
-        if (semester == null || year == null || value == null) {
-            return;
-        }
-        LocalDate startBoundary;
-        LocalDate endBoundary;
-        switch (semester) {
-            case "Spring" -> {
-                startBoundary = LocalDate.of(year, Month.JANUARY, 1);
-                endBoundary = LocalDate.of(year, Month.APRIL, 30);
-            }
-            case "Summer" -> {
-                startBoundary = LocalDate.of(year, Month.MAY, 1);
-                endBoundary = LocalDate.of(year, Month.AUGUST, 31);
-            }
-            case "Fall" -> {
-                startBoundary = LocalDate.of(year, Month.SEPTEMBER, 1);
-                endBoundary = LocalDate.of(year, Month.DECEMBER, 31);
-            }
-            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "Semester must be Spring, Summer, or Fall");
-        }
-
-        LocalDate valueDate = value.toLocalDate();
-        if (valueDate.isBefore(startBoundary) || valueDate.isAfter(endBoundary)) {
-            throw new ApiException(
-                    HttpStatus.BAD_REQUEST,
-                    label + " must stay inside " + semester + " " + year
-            );
-        }
-    }
-
-    private String writeAwards(List<EventWizardAwardRequest> awards) {
-        if (awards == null || awards.isEmpty()) {
-            return null;
-        }
-        try {
-            return objectMapper.writeValueAsString(awards);
-        } catch (JsonProcessingException exception) {
-            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save awards configuration");
-        }
-    }
-
-    private List<EventWizardAwardRequest> readAwards(String rawAwards) {
-        if (rawAwards == null || rawAwards.isBlank()) {
-            return Collections.emptyList();
-        }
-        try {
-            return objectMapper.readValue(rawAwards, new TypeReference<List<EventWizardAwardRequest>>() {});
-        } catch (JsonProcessingException exception) {
-            return Collections.emptyList();
-        }
-    }
-
-    private List<EventWizardCriterionRequest> sanitizeRoundCriteria(List<EventWizardCriterionRequest> criteria) {
-        if (criteria == null) {
-            return Collections.emptyList();
-        }
-        List<EventWizardCriterionRequest> sanitized = criteria.stream()
-                .filter(item -> item != null && item.criterionName() != null && !item.criterionName().trim().isBlank())
-                .map(item -> new EventWizardCriterionRequest(
-                        item.criterionName().trim(),
-                        item.description() == null ? null : item.description().trim(),
-                        item.weight()
-                ))
-                .toList();
-        int totalWeight = sanitized.stream().mapToInt(item -> item.weight() == null ? 0 : item.weight()).sum();
-        for (EventWizardCriterionRequest criterion : sanitized) {
-            if (criterion.weight() == null || criterion.weight() < 1) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Each scoring criterion needs weight greater than 0");
-            }
-        }
-        if (!sanitized.isEmpty() && totalWeight != 100) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Scoring criteria weights must total 100");
-        }
-        return sanitized;
-    }
-
-    private List<EventWizardCriterionRequest> readCriteriaForRound(Integer roundId) {
-        if (roundId == null) {
-            return Collections.emptyList();
-        }
-        return scoringCriteriaRepository.findByRoundIdOrderByCriteriaId(roundId).stream()
-                .map(criteria -> new EventWizardCriterionRequest(
-                        criteria.getCriteriaName(),
-                        criteria.getCriteriaType(),
-                        criteria.getWeight() == null ? null : criteria.getWeight().intValue()
-                ))
-                .toList();
-    }
-
-    private void syncRoundCriteria(RoundEntity round, List<EventWizardCriterionRequest> criteria) {
-        if (round.getRoundId() == null) {
-            return;
-        }
-        List<EventWizardCriterionRequest> sanitizedCriteria = sanitizeRoundCriteria(criteria);
-        scoringCriteriaRepository.deleteByRoundId(round.getRoundId());
-        if (sanitizedCriteria.isEmpty()) {
-            return;
-        }
-        List<ScoringCriteriaEntity> entities = new ArrayList<>();
-        for (EventWizardCriterionRequest criterion : sanitizedCriteria) {
-            ScoringCriteriaEntity entity = new ScoringCriteriaEntity();
-            entity.setRoundId(round.getRoundId());
-            entity.setCriteriaName(criterion.criterionName().trim());
-            entity.setCriteriaType(criterion.criterionName().trim());
-            entity.setWeight(BigDecimal.valueOf(criterion.weight()));
-            entities.add(entity);
-        }
-        scoringCriteriaRepository.saveAll(entities);
-    }
-
-    private String normalizeFinalRoundName(String roundName) {
-        if (roundName == null || roundName.trim().isBlank()) {
-            return "Final";
-        }
-        return "Grand Final".equalsIgnoreCase(roundName.trim()) ? "Final" : roundName.trim();
-    }
-
     private void applyRoundRequest(RoundEntity round, RoundUpsertRequest request) {
-        round.setRoundName(request.roundName().trim());
+        round.setRoundName(requireTrimmedValue(request.roundName(), "Round name is required"));
         round.setRoundOrder(request.roundOrder());
         round.setSubmissionDeadline(request.submissionDeadline());
         round.setPromotionRuleTopN(request.promotionRuleTopN());
-        round.setFinalRound(false);
-        round.setStartAt(request.submissionDeadline());
-        round.setEndAt(request.submissionDeadline());
         if (round.getScoreLocked() == null) {
             round.setScoreLocked(false);
         }
     }
 
+    private EventStructureConfigDto resolveConfiguration(HackathonEventEntity event) {
+        if (event.getConfigurationJson() != null && !event.getConfigurationJson().isBlank()) {
+            try {
+                return objectMapper.readValue(event.getConfigurationJson(), EventStructureConfigDto.class);
+            } catch (JsonProcessingException exception) {
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "Stored event configuration is invalid");
+            }
+        }
+        return deriveLegacyConfiguration(event);
+    }
+
+    private String writeConfiguration(EventStructureConfigDto configuration) {
+        try {
+            return objectMapper.writeValueAsString(configuration);
+        } catch (JsonProcessingException exception) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to store event configuration");
+        }
+    }
+
+    private EventStructureConfigDto deriveLegacyConfiguration(HackathonEventEntity event) {
+        List<TrackEntity> tracks = trackRepository.findByEventIdOrderByTrackIdAsc(event.getEventId());
+        List<RoundEntity> rounds = roundRepository.findByEventIdOrderByRoundOrderAsc(event.getEventId());
+        String seasonName = SEASON_ORDER.stream()
+                .filter(candidate -> candidate.equalsIgnoreCase(event.getSeason()))
+                .findFirst()
+                .orElse("Summer");
+        SemesterRef semester = new SemesterRef(seasonName, event.getYear());
+
+        List<EventStructureConfigDto.TrackConfigDto> derivedTracks = tracks.stream()
+                .map(track -> new EventStructureConfigDto.TrackConfigDto(
+                        normalizeKey("track-" + track.getTrackId(), track.getName(), "track", track.getTrackId()),
+                        track.getName(),
+                        null
+                ))
+                .toList();
+
+        List<EventStructureConfigDto.RoundStageConfigDto> derivedRounds = new ArrayList<>();
+        List<EventStructureConfigDto.PromotionRuleDto> derivedPromotionRules = new ArrayList<>();
+        for (int index = 0; index < rounds.size(); index += 1) {
+            RoundEntity round = rounds.get(index);
+            boolean finalRound = index == rounds.size() - 1;
+
+            derivedRounds.add(new EventStructureConfigDto.RoundStageConfigDto(
+                    normalizeKey("round-" + round.getRoundId(), round.getRoundName(), "round", round.getRoundId()),
+                    round.getRoundName(),
+                    round.getRoundOrder(),
+                    round.getSubmissionDeadline().toLocalDate(),
+                    round.getSubmissionDeadline().toLocalDate(),
+                    finalRound
+            ));
+
+            if (!finalRound) {
+                RoundEntity nextRound = rounds.get(index + 1);
+                for (EventStructureConfigDto.TrackConfigDto track : derivedTracks) {
+                    derivedPromotionRules.add(new EventStructureConfigDto.PromotionRuleDto(
+                            track.trackKey(),
+                            normalizeKey("round-" + round.getRoundId(), round.getRoundName(), "round", round.getRoundId()),
+                            normalizeKey("round-" + nextRound.getRoundId(), nextRound.getRoundName(), "round", nextRound.getRoundId()),
+                            Math.max(1, round.getPromotionRuleTopN())
+                    ));
+                }
+            }
+        }
+
+        List<EventStructureConfigDto.SeasonConfigDto> seasons = List.of(
+                new EventStructureConfigDto.SeasonConfigDto(
+                        seasonName,
+                        event.getYear(),
+                        event.getStartDate(),
+                        event.getStartDate(),
+                        event.getStartDate(),
+                        event.getEndDate(),
+                        "TEAM_SELECT",
+                        derivedTracks,
+                        derivedRounds,
+                        derivedPromotionRules,
+                        "RANK_BY_SCORE",
+                        List.of(),
+                        List.of(new EventStructureConfigDto.AwardConfigDto("Champion", 1))
+                )
+        );
+
+        return new EventStructureConfigDto(
+                semesterLabel(semester),
+                semesterLabel(semester),
+                seasons,
+                false,
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                List.of()
+        );
+    }
+
     private EventManagementDto toEventDto(HackathonEventEntity event) {
-        int trackCount = trackRepository.findByEventIdOrderByTrackIdAsc(event.getEventId()).size();
-        int roundCount = roundRepository.findByEventIdOrderByRoundOrderAsc(event.getEventId()).size();
-        boolean canDelete = teamRepository.countByEventId(event.getEventId()) == 0;
-        EventStatus normalizedStatus = safeStatus(event.getStatus());
         return new EventManagementDto(
                 event.getEventId(),
                 event.getName(),
-                event.getSemester(),
+                event.getSeason(),
                 event.getYear(),
                 event.getStartDate(),
                 event.getEndDate(),
-                normalizedStatus.getDbValue(),
+                event.getStatus(),
                 event.getDescription(),
-                event.getRegistrationStartAt(),
-                event.getRegistrationEndAt(),
-                event.getCompetitionStartAt(),
-                event.getCompetitionEndAt(),
-                event.getTrackSelectionMode(),
-                event.getRankingMethod(),
-                trackCount,
-                roundCount,
-                canDelete,
-                normalizedStatus != EventStatus.DRAFT
+                resolveConfiguration(event)
         );
-    }
-
-    private EventWizardDetailDto toWizardDetailDto(HackathonEventEntity event) {
-        List<TrackEntity> tracks = trackRepository.findByEventIdOrderByTrackIdAsc(event.getEventId());
-        List<RoundEntity> rounds = roundRepository.findByEventIdOrderByRoundOrderAsc(event.getEventId());
-        List<EventWizardRoundRequest> qualifyingRounds = rounds.stream()
-                .filter(round -> !Boolean.TRUE.equals(round.getFinalRound()))
-                .sorted(Comparator.comparing(RoundEntity::getRoundOrder))
-                .map(round -> new EventWizardRoundRequest(
-                        round.getRoundId(),
-                        round.getRoundName(),
-                        round.getRoundOrder(),
-                        round.getSubmissionDeadline(),
-                        round.getPromotionRuleTopN(),
-                        false,
-                        readCriteriaForRound(round.getRoundId())
-                ))
-                .toList();
-        EventWizardRoundRequest finalRound = rounds.stream()
-                .filter(round -> Boolean.TRUE.equals(round.getFinalRound()))
-                .findFirst()
-                .map(round -> new EventWizardRoundRequest(
-                        round.getRoundId(),
-                        normalizeFinalRoundName(round.getRoundName()),
-                        round.getRoundOrder(),
-                        round.getSubmissionDeadline(),
-                        null,
-                        true,
-                        readCriteriaForRound(round.getRoundId())
-                ))
-                .orElse(null);
-
-        boolean hasParticipants = teamRepository.countByEventId(event.getEventId()) > 0;
-        EventStatus normalizedStatus = safeStatus(event.getStatus());
-        return new EventWizardDetailDto(
-                event.getEventId(),
-                event.getName(),
-                event.getSemester(),
-                event.getYear(),
-                normalizedStatus.getDbValue(),
-                event.getDescription(),
-                event.getRegistrationStartAt(),
-                event.getRegistrationEndAt(),
-                event.getCompetitionStartAt(),
-                event.getCompetitionEndAt(),
-                event.getTrackSelectionMode(),
-                tracks.stream()
-                        .map(track -> new EventWizardTrackRequest(track.getTrackId(), track.getName()))
-                        .toList(),
-                qualifyingRounds,
-                finalRound,
-                event.getRankingMethod(),
-                readAwards(event.getAwardsJson()),
-                Collections.emptyList(),
-                normalizedStatus != EventStatus.DRAFT,
-                normalizedStatus == EventStatus.DRAFT,
-                !hasParticipants,
-                hasParticipants
-        );
-    }
-
-    private EventStatus safeStatus(String rawStatus) {
-        try {
-            return EventStatus.from(rawStatus);
-        } catch (RuntimeException exception) {
-            return EventStatus.DRAFT;
-        }
     }
 
     private TrackDto toTrackDto(TrackEntity track) {
@@ -1362,39 +1533,9 @@ public class EventManagementService {
         );
     }
 
-    private Map<String, Object> toEventAuditPayload(HackathonEventEntity event) {
-        Map<String, Object> payload = new java.util.LinkedHashMap<>();
-        payload.put("eventId", event.getEventId());
-        payload.put("name", event.getName());
-        payload.put("semester", event.getSemester());
-        payload.put("year", event.getYear());
-        payload.put("status", event.getStatus());
-        payload.put("description", event.getDescription());
-        payload.put("registrationStartAt", event.getRegistrationStartAt());
-        payload.put("registrationEndAt", event.getRegistrationEndAt());
-        payload.put("competitionStartAt", event.getCompetitionStartAt());
-        payload.put("competitionEndAt", event.getCompetitionEndAt());
-        payload.put("trackSelectionMode", event.getTrackSelectionMode());
-        payload.put("rankingMethod", event.getRankingMethod());
-        payload.put("publishedAt", event.getPublishedAt());
-        return payload;
+    private record SemesterRef(String season, Integer year) {
     }
 
-    private record EventDraftSnapshot(
-            String name,
-            String semester,
-            Integer year,
-            String description,
-            LocalDateTime registrationStartAt,
-            LocalDateTime registrationEndAt,
-            LocalDateTime competitionStartAt,
-            LocalDateTime competitionEndAt,
-            String trackSelectionMode,
-            List<EventWizardTrackRequest> tracks,
-            List<EventWizardRoundRequest> qualifyingRounds,
-            EventWizardRoundRequest finalRound,
-            String rankingMethod,
-            List<EventWizardAwardRequest> awards
-    ) {
+    private record SemesterRange(SemesterRef start, SemesterRef end) {
     }
 }

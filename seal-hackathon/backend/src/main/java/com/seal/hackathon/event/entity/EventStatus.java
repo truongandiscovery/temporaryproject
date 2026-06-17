@@ -2,8 +2,13 @@ package com.seal.hackathon.event.entity;
 
 public enum EventStatus {
     DRAFT("Draft"),
+    CONFIGURED("Configured"),
+    REGISTRATION_OPEN("RegistrationOpen"),
     ONGOING("Ongoing"),
-    ENDED("Ended");
+    SCORING("Scoring"),
+    RESULT_PUBLISHED("ResultPublished"),
+    CLOSED("Closed"),
+    CANCELLED("Cancelled");
 
     private final String dbValue;
 
@@ -29,23 +34,13 @@ public enum EventStatus {
         if ("UPCOMING".equalsIgnoreCase(normalized)) {
             return DRAFT;
         }
-        if ("ACTIVE".equalsIgnoreCase(normalized)
-                || "CONFIGURED".equalsIgnoreCase(normalized)
-                || "REGISTRATIONOPEN".equalsIgnoreCase(normalized)
-                || "SCORING".equalsIgnoreCase(normalized)
-                || "RESULTPUBLISHED".equalsIgnoreCase(normalized)) {
+        if ("ACTIVE".equalsIgnoreCase(normalized)) {
             return ONGOING;
-        }
-        if ("CLOSED".equalsIgnoreCase(normalized)
-                || "CANCELLED".equalsIgnoreCase(normalized)
-                || "COMPLETED".equalsIgnoreCase(normalized)
-                || "FINISHED".equalsIgnoreCase(normalized)) {
-            return ENDED;
         }
         throw new IllegalArgumentException("Invalid event status: " + rawStatus);
     }
 
     public boolean isTerminal() {
-        return this == ENDED;
+        return this == CLOSED || this == CANCELLED;
     }
 }

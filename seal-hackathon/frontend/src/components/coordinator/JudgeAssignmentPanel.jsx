@@ -328,14 +328,14 @@ export default function JudgeAssignmentPanel() {
       ) : events.length === 0 ? (
         <Box className="ms-empty">
           <Typography fontWeight={800}>No events configured</Typography>
-          <Typography color="text.secondary" variant="body2">Create an event first before assigning judges.</Typography>
+          <Typography color="text.secondary" variant="body2">Create an event first in Event Configuration.</Typography>
         </Box>
       ) : (
         <>
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 2.5 }}>
             {events.map((event) => (
               <Chip key={event.eventId}
-                label={event.name}
+                label={`${event.name} (${event.season} ${event.year})`}
                 onClick={() => setSelectedEventId(event.eventId)}
                 sx={{
                   cursor: "pointer",
@@ -355,7 +355,7 @@ export default function JudgeAssignmentPanel() {
           ) : rounds.length === 0 ? (
             <Box className="ms-empty">
               <Typography fontWeight={800}>No rounds for this event</Typography>
-              <Typography color="text.secondary" variant="body2">Add rounds to this event before assigning judges.</Typography>
+              <Typography color="text.secondary" variant="body2">Configure rounds in Event Configuration first.</Typography>
             </Box>
           ) : (
             <Stack spacing={1.5}>

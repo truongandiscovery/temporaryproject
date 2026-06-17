@@ -200,7 +200,7 @@ export default function UserProfilePanel({ onDirtyChange = () => {} }) {
     if (roles.includes("COORDINATOR")) {
       items.push({
         title: "Coordinator Workspace",
-        description: "Manage approvals, events, tracks, and round configuration for SEAL semesters.",
+        description: "Manage approvals, events, tracks, and round configuration for SEAL seasons.",
       });
     }
     if (roles.includes("MENTOR")) {

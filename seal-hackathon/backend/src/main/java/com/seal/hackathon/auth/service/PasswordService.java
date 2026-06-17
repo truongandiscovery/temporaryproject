@@ -87,7 +87,6 @@ public class PasswordService {
         PasswordResetTokenEntity tokenEntity = validateResetOtp(user, otp);
 
         user.setPasswordHash(passwordEncoder.encode(newPassword));
-        user.setMustChangePassword(false);
         userRepository.save(user);
 
         tokenEntity.setUsed(true);
@@ -117,7 +116,6 @@ public class PasswordService {
         }
 
         user.setPasswordHash(passwordEncoder.encode(newPassword));
-        user.setMustChangePassword(false);
         userRepository.save(user);
     }
 

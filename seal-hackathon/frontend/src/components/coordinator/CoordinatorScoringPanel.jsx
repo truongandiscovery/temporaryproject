@@ -117,7 +117,7 @@ function EventRoundSelector({
             {events.map((event) => (
               <Chip
                 key={event.eventId}
-                label={event.name}
+                label={`${event.name} (${event.season} ${event.year})`}
                 onClick={() => onSelectEvent(event.eventId)}
                 sx={{
                   cursor: "pointer",

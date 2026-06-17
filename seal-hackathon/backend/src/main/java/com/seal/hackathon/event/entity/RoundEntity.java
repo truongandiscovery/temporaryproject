@@ -31,21 +31,12 @@ public class RoundEntity {
     @Column(name = "round_order", nullable = false)
     private Integer roundOrder;
 
-    @Column(name = "submission_deadline")
+    @Column(name = "submission_deadline", nullable = false)
     private LocalDateTime submissionDeadline;
 
-    @Column(name = "promotion_rule_top_n")
+    @Column(name = "promotion_rule_top_n", nullable = false)
     private Integer promotionRuleTopN;
 
     @Column(name = "score_locked", nullable = false)
     private Boolean scoreLocked = false;
-
-    @Column(name = "start_at")
-    private LocalDateTime startAt;
-
-    @Column(name = "end_at")
-    private LocalDateTime endAt;
-
-    @Column(name = "is_final", nullable = false)
-    private Boolean finalRound = false;
 }

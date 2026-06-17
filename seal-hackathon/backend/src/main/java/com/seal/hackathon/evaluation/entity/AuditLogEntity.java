@@ -38,12 +38,8 @@ public class AuditLogEntity {
     @Column(name = "target_entity", nullable = false, length = 100)
     private String targetEntity;
 
-    @Column(name = "target_id")
+    @Column(name = "target_id", nullable = false)
     private Integer targetId;
-
-    @Nationalized
-    @Column(name = "target_name", length = 255)
-    private String targetName;
 
     @Nationalized
     @Column(name = "old_value", columnDefinition = "NVARCHAR(MAX)")
@@ -56,13 +52,6 @@ public class AuditLogEntity {
     @Nationalized
     @Column(name = "reason", columnDefinition = "NVARCHAR(MAX)")
     private String reason;
-
-    @Column(name = "ip_address", length = 64)
-    private String ipAddress;
-
-    @Nationalized
-    @Column(name = "device_info", length = 1000)
-    private String deviceInfo;
 
     @Column(name = "timestamp", nullable = false)
     private LocalDateTime timestamp;

@@ -5,7 +5,6 @@ import com.seal.hackathon.auth.dto.GuestJudgeDto;
 import com.seal.hackathon.auth.entity.*;
 import com.seal.hackathon.auth.repository.*;
 import com.seal.hackathon.common.ApiException;
-import com.seal.hackathon.evaluation.service.AuditLogService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -19,29 +18,22 @@ import java.util.Locale;
 @Service
 public class GuestJudgeService {
 
-    private static final String UPPERCASE = "ABCDEFGHJKMNPQRSTUVWXYZ";
-    private static final String LOWERCASE = "abcdefghjkmnpqrstuvwxyz";
-    private static final String DIGITS = "23456789";
-    private static final String SPECIALS = "!@#$%^&*?";
-    private static final String ALL_PASSWORD_CHARS = UPPERCASE + LOWERCASE + DIGITS + SPECIALS;
+    private static final String CHARS = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
     private final SecureRandom random = new SecureRandom();
 
     private final UserRepository userRepository;
     private final UserRoleRepository userRoleRepository;
     private final JudgeProfileRepository judgeProfileRepository;
     private final PasswordEncoder passwordEncoder;
-    private final AuditLogService auditLogService;
 
     public GuestJudgeService(UserRepository userRepository,
                               UserRoleRepository userRoleRepository,
                               JudgeProfileRepository judgeProfileRepository,
-                              PasswordEncoder passwordEncoder,
-                              AuditLogService auditLogService) {
+                              PasswordEncoder passwordEncoder) {
         this.userRepository = userRepository;
         this.userRoleRepository = userRoleRepository;
         this.judgeProfileRepository = judgeProfileRepository;
         this.passwordEncoder = passwordEncoder;
-        this.auditLogService = auditLogService;
     }
 
     @Transactional
@@ -66,7 +58,6 @@ public class GuestJudgeService {
         user.setPasswordHash(passwordEncoder.encode(tempPassword));
         user.setStatus(UserStatus.ACTIVE.getDbValue());
         user.setApproved(true);
-        user.setMustChangePassword(true);
 
         UserRoleEntity role = new UserRoleEntity();
         role.setUser(user);
@@ -83,17 +74,7 @@ public class GuestJudgeService {
         profile.setAccountExpiry(expiry);
         judgeProfileRepository.save(profile);
 
-        GuestJudgeDto dto = toDto(saved, savedRole, profile, tempPassword);
-        auditLogService.record(
-                "GUEST_JUDGE_CREATED",
-                "USER",
-                saved.getUserId(),
-                saved.getFullName(),
-                null,
-                dto,
-                "Coordinator created a guest judge account"
-        );
-        return dto;
+        return toDto(saved, savedRole, profile, tempPassword);
     }
 
     @Transactional(readOnly = true)
@@ -123,21 +104,10 @@ public class GuestJudgeService {
 
         String tempPassword = generatePassword();
         user.setPasswordHash(passwordEncoder.encode(tempPassword));
-        user.setMustChangePassword(true);
         userRepository.save(user);
 
         JudgeProfileEntity profile = judgeProfileRepository.findById(role.getUserRoleId()).orElse(null);
-        GuestJudgeDto dto = toDto(user, role, profile, tempPassword);
-        auditLogService.record(
-                "GUEST_JUDGE_PASSWORD_RESET",
-                "USER",
-                user.getUserId(),
-                user.getFullName(),
-                null,
-                dto,
-                "Coordinator reset the guest judge temporary password"
-        );
-        return dto;
+        return toDto(user, role, profile, tempPassword);
     }
 
     @Transactional
@@ -147,19 +117,9 @@ public class GuestJudgeService {
         boolean isJudge = user.getUserRoles().stream()
                 .anyMatch(r -> r.getRoleType().equalsIgnoreCase(RoleType.JUDGE.getDbValue()));
         if (!isJudge) throw new ApiException(HttpStatus.BAD_REQUEST, "User is not a judge");
-        String previousStatus = user.getStatus();
         user.setStatus(UserStatus.SUSPENDED.getDbValue());
         user.setApproved(false);
         userRepository.save(user);
-        auditLogService.record(
-                "GUEST_JUDGE_DEACTIVATED",
-                "USER",
-                user.getUserId(),
-                user.getFullName(),
-                previousStatus,
-                user.getStatus(),
-                "Coordinator deactivated a guest judge account"
-        );
     }
 
     private GuestJudgeDto toDto(UserEntity user, UserRoleEntity role, JudgeProfileEntity profile, String tempPassword) {
@@ -179,28 +139,8 @@ public class GuestJudgeService {
     }
 
     private String generatePassword() {
-        char[] password = new char[12];
-        password[0] = randomChar(UPPERCASE);
-        password[1] = randomChar(LOWERCASE);
-        password[2] = randomChar(DIGITS);
-        password[3] = randomChar(SPECIALS);
-        for (int i = 4; i < password.length; i++) {
-            password[i] = randomChar(ALL_PASSWORD_CHARS);
-        }
-        shuffle(password);
-        return new String(password);
-    }
-
-    private char randomChar(String source) {
-        return source.charAt(random.nextInt(source.length()));
-    }
-
-    private void shuffle(char[] password) {
-        for (int i = password.length - 1; i > 0; i--) {
-            int swapIndex = random.nextInt(i + 1);
-            char temp = password[i];
-            password[i] = password[swapIndex];
-            password[swapIndex] = temp;
-        }
+        StringBuilder sb = new StringBuilder(12);
+        for (int i = 0; i < 12; i++) sb.append(CHARS.charAt(random.nextInt(CHARS.length())));
+        return sb.toString();
     }
 }

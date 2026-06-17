@@ -368,8 +368,7 @@ public class AuthService {
                 user.getUsername(),
                 user.getFullName(),
                 user.getStatus(),
-                roleNames,
-                Boolean.TRUE.equals(user.getMustChangePassword())
+                roleNames
         );
     }
 

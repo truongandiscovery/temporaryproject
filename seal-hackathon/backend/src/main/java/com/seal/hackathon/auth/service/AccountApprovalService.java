@@ -10,7 +10,6 @@ import com.seal.hackathon.auth.entity.UserRoleEntity;
 import com.seal.hackathon.auth.repository.StudentProfileRepository;
 import com.seal.hackathon.auth.repository.UserRepository;
 import com.seal.hackathon.common.ApiException;
-import com.seal.hackathon.evaluation.service.AuditLogService;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -30,16 +29,13 @@ public class AccountApprovalService {
     private final UserRepository userRepository;
     private final StudentProfileRepository studentProfileRepository;
     private final AccountApprovalNotificationService accountApprovalNotificationService;
-    private final AuditLogService auditLogService;
 
     public AccountApprovalService(UserRepository userRepository,
             StudentProfileRepository studentProfileRepository,
-            AccountApprovalNotificationService accountApprovalNotificationService,
-            AuditLogService auditLogService) {
+            AccountApprovalNotificationService accountApprovalNotificationService) {
         this.userRepository = userRepository;
         this.studentProfileRepository = studentProfileRepository;
         this.accountApprovalNotificationService = accountApprovalNotificationService;
-        this.auditLogService = auditLogService;
     }
 
     @Transactional(readOnly = true)
@@ -73,10 +69,8 @@ public class AccountApprovalService {
     public PendingUserDto processAction(Integer userId, String action, String reason) {
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User not found"));
-        PendingUserDto previous = toDto(user);
         UserStatus currentStatus = UserStatus.from(user.getStatus());
         boolean sendApprovedEmail = false;
-        String auditAction;
 
         switch (normalizeAction(action)) {
             case "ACTIVE" -> {
@@ -88,7 +82,6 @@ public class AccountApprovalService {
                 user.setApproved(true);
                 user.setRejectionReason(null);
                 sendApprovedEmail = true;
-                auditAction = "ACCOUNT_APPROVED";
             }
             case "REJECTED" -> {
                 if (currentStatus != UserStatus.PENDING_APPROVAL) {
@@ -102,7 +95,6 @@ public class AccountApprovalService {
                 user.setApproved(false);
                 user.setRejectionReason(reason.trim());
                 accountApprovalNotificationService.sendRejectedEmail(user, reason.trim());
-                auditAction = "ACCOUNT_REJECTED";
             }
             case "PENDING_APPROVAL" -> {
                 if (currentStatus != UserStatus.REJECTED) {
@@ -113,7 +105,6 @@ public class AccountApprovalService {
                 user.setStatus(UserStatus.PENDING_APPROVAL.getDbValue());
                 user.setApproved(false);
                 user.setRejectionReason(null);
-                auditAction = "ACCOUNT_RESUBMITTED";
             }
             case "SUSPENDED" -> {
                 if (currentStatus != UserStatus.ACTIVE) {
@@ -122,27 +113,16 @@ public class AccountApprovalService {
                 }
                 user.setStatus(UserStatus.SUSPENDED.getDbValue());
                 user.setApproved(false);
-                auditAction = "ACCOUNT_SUSPENDED";
             }
             default -> throw new ApiException(HttpStatus.BAD_REQUEST,
                     "Invalid action. Allowed: ACTIVE, REJECTED, PENDING_APPROVAL, SUSPENDED");
         }
 
         userRepository.save(user);
-        PendingUserDto updated = toDto(user);
-        auditLogService.record(
-                auditAction,
-                "USER",
-                user.getUserId(),
-                user.getFullName(),
-                previous,
-                updated,
-                isBlank(reason) ? null : reason.trim()
-        );
         if (sendApprovedEmail) {
             accountApprovalNotificationService.sendApprovedEmail(user);
         }
-        return updated;
+        return toDto(user);
     }
 
     @Transactional(readOnly = true)
@@ -167,7 +147,6 @@ public class AccountApprovalService {
     public PendingUserDto updateManagedUser(Integer userId, UpdateManagedUserRequest request) {
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User not found"));
-        PendingUserDto previous = toDto(user);
 
         String normalizedUsername = request.username().trim().toLowerCase(Locale.ROOT);
         if (!normalizedUsername.equalsIgnoreCase(user.getUsername())
@@ -218,20 +197,10 @@ public class AccountApprovalService {
         }
 
         userRepository.save(user);
-        PendingUserDto updated = toDto(user);
-        auditLogService.record(
-                "USER_UPDATED",
-                "USER",
-                user.getUserId(),
-                user.getFullName(),
-                previous,
-                updated,
-                "Coordinator updated managed account details"
-        );
         if (sendApprovedEmail) {
             accountApprovalNotificationService.sendApprovedEmail(user);
         }
-        return updated;
+        return toDto(user);
     }
 
     private PendingUserDto toDto(UserEntity user) {

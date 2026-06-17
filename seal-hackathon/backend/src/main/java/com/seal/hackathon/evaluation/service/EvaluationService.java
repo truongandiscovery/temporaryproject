@@ -192,7 +192,7 @@ public class EvaluationService {
                         .stream()
                         .map(this::toScoreHistoryDto)
                         .toList(),
-                feedbackHistoryForViewer(submissionId, judgeRole)
+                listFeedbackForAuthorizedUser(authentication, submissionId)
         );
     }
 
@@ -240,10 +240,6 @@ public class EvaluationService {
 
         for (CriterionScoreRequest item : request.scores()) {
             ScoringCriteriaEntity criteriaEntity = criteriaById.get(item.criteriaId());
-            BigDecimal normalizedScore = item.scoreValue().setScale(2, RoundingMode.HALF_UP);
-            if (normalizedScore.compareTo(BigDecimal.ZERO) < 0 || normalizedScore.compareTo(BigDecimal.TEN) > 0) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Each criterion score must stay between 0 and 10");
-            }
             ScoreEntity score = scoreRepository
                     .findBySubmissionSubmissionIdAndCriteriaCriteriaIdAndJudgeAssignmentJudgeAssignmentId(
                             submissionId,
@@ -256,7 +252,7 @@ public class EvaluationService {
             score.setSubmission(submission);
             score.setCriteria(criteriaEntity);
             score.setJudgeAssignment(assignment);
-            score.setScoreValue(normalizedScore);
+            score.setScoreValue(item.scoreValue().setScale(2, RoundingMode.HALF_UP));
             score.setComment(normalizeOptional(item.comment()));
             scoreRepository.save(score);
             appendScoreHistory(
@@ -328,8 +324,11 @@ public class EvaluationService {
     @Transactional(readOnly = true)
     public List<FeedbackDto> listFeedbackForAuthorizedUser(Authentication authentication, Integer submissionId) {
         SubmissionEntity submission = getSubmissionOrThrow(submissionId);
-        UserRoleEntity viewerRole = requireFeedbackAccess(authentication, submission, false);
-        return feedbackHistoryForViewer(submissionId, viewerRole);
+        requireFeedbackAccess(authentication, submission, false);
+        return feedbackRepository.findBySubmissionSubmissionIdOrderByCreatedAtDesc(submissionId)
+                .stream()
+                .map(this::toFeedbackDto)
+                .toList();
     }
 
     @Transactional
@@ -365,7 +364,9 @@ public class EvaluationService {
         }
 
         EventStatus eventStatus = EventStatus.from(eventFor(evaluation.getSubmission()).getStatus());
-        if (eventStatus.isTerminal()) {
+        if (eventStatus == EventStatus.RESULT_PUBLISHED
+                || eventStatus == EventStatus.CLOSED
+                || eventStatus == EventStatus.CANCELLED) {
             throw new ApiException(HttpStatus.CONFLICT, "Evaluation cannot be reopened after event results are closed");
         }
 
@@ -392,17 +393,15 @@ public class EvaluationService {
         auditLogService.record(
                 actor,
                 "JUDGE_EVALUATION_REOPENED",
-                "SUBMISSION",
-                evaluation.getSubmission().getSubmissionId(),
+                "EVALUATION",
+                evaluationId,
                 Map.of(
                         "status", "Finalized",
-                        "submissionId", evaluation.getSubmission().getSubmissionId(),
-                        "evaluationId", evaluationId
+                        "submissionId", evaluation.getSubmission().getSubmissionId()
                 ),
                 Map.of(
                         "status", "Draft",
-                        "submissionId", evaluation.getSubmission().getSubmissionId(),
-                        "evaluationId", evaluationId
+                        "submissionId", evaluation.getSubmission().getSubmissionId()
                 ),
                 "Coordinator reopened a finalized evaluation for submission " + evaluation.getSubmission().getTeam().getTeamName()
         );
@@ -515,14 +514,8 @@ public class EvaluationService {
             return "Score editing is locked because this round is closed";
         }
         EventStatus status = EventStatus.from(event.getStatus());
-        if (status.isTerminal()) {
+        if (status == EventStatus.RESULT_PUBLISHED || status == EventStatus.CLOSED || status == EventStatus.CANCELLED) {
             return "Score editing is locked after event results are closed";
-        }
-        if (submission.getRound().getSubmissionDeadline() == null) {
-            return "Scoring opens only after the submission deadline is configured";
-        }
-        if (LocalDateTime.now().isBefore(submission.getRound().getSubmissionDeadline())) {
-            return "Scoring opens only after the submission deadline has passed";
         }
         if (SubmissionStatus.from(submission.getStatus()) == SubmissionStatus.ELIMINATED) {
             return "Eliminated submissions cannot be scored";
@@ -590,7 +583,7 @@ public class EvaluationService {
                 assignment.getRound().getRoundName(),
                 assignment.getRound().getRoundOrder(),
                 assignment.getRound().getSubmissionDeadline(),
-                isRoundScoringLocked(assignment, event),
+                Boolean.TRUE.equals(assignment.getRound().getScoreLocked()),
                 assignment.getTrack().getTrackId(),
                 assignment.getTrack().getName(),
                 matchingSubmissions.size(),
@@ -669,36 +662,6 @@ public class EvaluationService {
             throw new ApiException(HttpStatus.NOT_FOUND, "Event not found");
         }
         return event;
-    }
-
-    private List<FeedbackDto> feedbackHistoryForViewer(Integer submissionId, UserRoleEntity viewerRole) {
-        return feedbackRepository.findBySubmissionSubmissionIdOrderByCreatedAtDesc(submissionId)
-                .stream()
-                .filter(feedback -> canViewerSeeFeedback(feedback, viewerRole))
-                .map(this::toFeedbackDto)
-                .toList();
-    }
-
-    private boolean canViewerSeeFeedback(FeedbackEntity feedback, UserRoleEntity viewerRole) {
-        if (viewerRole == null || viewerRole.getRoleType() == null) {
-            return false;
-        }
-        if (RoleType.JUDGE.getDbValue().equalsIgnoreCase(viewerRole.getRoleType())) {
-            return feedback.getAuthorRole() != null
-                    && viewerRole.getUserRoleId().equals(feedback.getAuthorRole().getUserRoleId());
-        }
-        return true;
-    }
-
-    private boolean isRoundScoringLocked(JudgeAssignmentEntity assignment, HackathonEventEntity event) {
-        if (Boolean.TRUE.equals(assignment.getRound().getScoreLocked())) {
-            return true;
-        }
-        if (event != null && EventStatus.from(event.getStatus()).isTerminal()) {
-            return true;
-        }
-        LocalDateTime deadline = assignment.getRound().getSubmissionDeadline();
-        return deadline == null || LocalDateTime.now().isBefore(deadline);
     }
 
     private MentorTeamDto toMentorTeamDto(TeamEntity team, List<SubmissionEntity> submissions) {

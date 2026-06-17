@@ -44,7 +44,7 @@ import ConfirmActionDialog from "../layout/ConfirmActionDialog";
 import ModulePageHeader from "../layout/ModulePageHeader";
 import "./team-management.css";
 
-const INITIAL_CREATE_FORM = { teamName: "" };
+const INITIAL_CREATE_FORM = { eventId: "", trackId: "", teamName: "" };
 const INITIAL_SUBMISSION_FORM = { roundId: "", repositoryUrl: "", demoUrl: "", slideUrl: "" };
 
 function getTeamHealth(team = {}) {
@@ -112,6 +112,8 @@ export default function TeamManagementPanel() {
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   const [submissionFeedback, setSubmissionFeedback] = useState([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [events, setEvents] = useState([]);
+  const [tracks, setTracks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -131,14 +133,14 @@ export default function TeamManagementPanel() {
   });
   const confirmationResolver = useRef(null);
 
+  const registrationEvents = useMemo(
+    () => events.filter((event) => event.status === "RegistrationOpen"),
+    [events]
+  );
+
   const pendingInvitations = useMemo(
     () => invitations.filter((invitation) => invitation.status === "Pending"),
     [invitations]
-  );
-
-  const readyTeams = useMemo(
-    () => teams.filter((team) => team.membershipValid).length,
-    [teams]
   );
 
   const selectedTeamMemberKeys = useMemo(
@@ -195,20 +197,15 @@ export default function TeamManagementPanel() {
 
     const ownedTeam = teams.find((team) => String(team.teamId) === String(teamId));
     try {
-      const teamResponse = await http.get(`/api/teams/${teamId}`);
-      const nextTeam = teamResponse.data?.data || null;
-      const [invitationResponse, submissionResponse, roundResponse] = await Promise.all([
+      const [teamResponse, invitationResponse, submissionResponse, roundResponse] = await Promise.all([
+        http.get(`/api/teams/${teamId}`),
         ownedTeam?.currentUserLeader
           ? http.get(`/api/teams/${teamId}/invitations`)
           : Promise.resolve({ data: { data: [] } }),
-        nextTeam?.eventId
-          ? http.get(`/api/teams/${teamId}/submissions`)
-          : Promise.resolve({ data: { data: [] } }),
-        nextTeam?.eventId
-          ? http.get(`/api/teams/${teamId}/submission-rounds`)
-          : Promise.resolve({ data: { data: [] } }),
+        http.get(`/api/teams/${teamId}/submissions`),
+        http.get(`/api/teams/${teamId}/submission-rounds`),
       ]);
-      setSelectedTeam(nextTeam);
+      setSelectedTeam(teamResponse.data?.data || null);
       setTeamInvitations(invitationResponse.data?.data || []);
       setSubmissions(submissionResponse.data?.data || []);
       setSubmissionRounds(roundResponse.data?.data || []);
@@ -227,13 +224,15 @@ export default function TeamManagementPanel() {
     setLoading(true);
     setError("");
     try {
-      const [teamResponse, invitationResponse] = await Promise.all([
+      const [teamResponse, invitationResponse, eventResponse] = await Promise.all([
         http.get("/api/teams/my"),
         http.get("/api/team-invitations/my"),
+        http.get("/api/public/events/upcoming"),
       ]);
       const nextTeams = teamResponse.data?.data || [];
       setTeams(nextTeams);
       setInvitations(invitationResponse.data?.data || []);
+      setEvents(eventResponse.data?.data || []);
 
       const teamId = preserveDetail ? selectedTeamId : null;
       if (teamId && nextTeams.some((team) => String(team.teamId) === String(teamId))) {
@@ -318,11 +317,13 @@ export default function TeamManagementPanel() {
     if (saving) return;
     setCreateDialogOpen(false);
     setCreateForm(INITIAL_CREATE_FORM);
+    setTracks([]);
   };
 
   const openCreate = () => {
     setCreateDialogOpen(true);
     setCreateForm(INITIAL_CREATE_FORM);
+    setTracks([]);
   };
 
   const openTeam = (teamId) => {
@@ -331,6 +332,19 @@ export default function TeamManagementPanel() {
 
   const backToTeamList = () => {
     setSearchParams({ section: "teams" });
+  };
+
+  const selectEvent = async (event) => {
+    const eventId = event.target.value;
+    setCreateForm((current) => ({ ...current, eventId, trackId: "" }));
+    setTracks([]);
+    if (!eventId) return;
+    try {
+      const response = await http.get(`/api/teams/events/${eventId}/tracks`);
+      setTracks(response.data?.data || []);
+    } catch (err) {
+      setError(getApiErrorMessage(err, "Failed to load categories"));
+    }
   };
 
   const refreshAfterTeamMutation = async (message, options = {}) => {
@@ -346,10 +360,11 @@ export default function TeamManagementPanel() {
     setError("");
     try {
       const response = await http.post("/api/teams", {
+        trackId: Number(createForm.trackId),
         teamName: createForm.teamName,
       });
       closeCreateDialog();
-      setSuccess("Team created. Invite 3 to 5 students first, then register this team in Event Registration.");
+      setSuccess("Team created. Open the team to invite members until it reaches 3-5 participants.");
       await loadWorkspace({ preserveDetail: false });
       const createdTeamId = response.data?.data?.teamId;
       if (createdTeamId) {
@@ -722,7 +737,7 @@ export default function TeamManagementPanel() {
       <ModulePageHeader
         eyebrow="Team Workspace"
         title="My Teams"
-        description="Manage your current teams and invitations here. Submission delivery now lives in the separate Submissions module."
+        description="Create one team per event, choose a track, and then open that team to manage members, invitations, and submissions."
         actions={(
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
             <Button startIcon={<RefreshRoundedIcon />} onClick={() => loadWorkspace()} variant="outlined">
@@ -735,17 +750,99 @@ export default function TeamManagementPanel() {
         )}
       />
 
+      <Box className="team-summary-strip">
+        <Card className="team-summary-card">
+          <Typography className="team-summary-label">Active teams</Typography>
+          <Typography className="team-summary-value">{teams.length}</Typography>
+        </Card>
+        <Card className="team-summary-card">
+          <Typography className="team-summary-label">Pending invitations</Typography>
+          <Typography className="team-summary-value">{pendingInvitations.length}</Typography>
+        </Card>
+        <Card className="team-summary-card">
+          <Typography className="team-summary-label">Open events</Typography>
+          <Typography className="team-summary-value">{registrationEvents.length}</Typography>
+        </Card>
+      </Box>
+
+      <Box className="team-grid">
+        {teams.map((team) => (
+          <Card className="team-card" key={team.teamId}>
+            <Box className="team-card-head">
+              <Box className="team-card-title">
+                <Box className="team-card-icon"><GroupsRoundedIcon fontSize="small" /></Box>
+                <Box>
+                  <Typography variant="h6">{team.teamName}</Typography>
+                  <Typography variant="body2" color="text.secondary">{team.eventName}</Typography>
+                </Box>
+              </Box>
+              <Chip
+                color={team.membershipValid ? "success" : "warning"}
+                label={team.membershipValid ? "Ready" : "Forming"}
+                size="small"
+              />
+            </Box>
+            <Divider />
+            <Box className="team-card-body">
+              <div><span>Track</span><strong>{team.trackName}</strong></div>
+              <div><span>Team Leader</span><strong>{team.leaderName}</strong></div>
+              <div><span>Members</span><strong>{getTeamHealth(team).members}</strong></div>
+              <div><span>Submission</span><strong>{getTeamHealth(team).submission}</strong></div>
+              <div><span>Current Round</span><strong>{getTeamHealth(team).round}</strong></div>
+              <div><span>Next Deadline</span><strong>{getTeamHealth(team).deadline}</strong></div>
+            </Box>
+            <Typography className="team-validation" color={team.membershipValid ? "success.main" : "warning.main"}>
+              {team.validationMessage}
+            </Typography>
+            <Stack className="team-actions" direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Button size="small" variant="outlined" endIcon={<OpenInNewRoundedIcon />} onClick={() => openTeam(team.teamId)}>
+                Open Team
+              </Button>
+              <Button
+                color="error"
+                size="small"
+                startIcon={<ExitToAppRoundedIcon />}
+                onClick={() => leaveTeam(team)}
+              >
+                Leave
+              </Button>
+              {team.currentUserLeader ? (
+                <Button
+                  color="error"
+                  disabled={!team.deletable}
+                  size="small"
+                  startIcon={<DeleteOutlineRoundedIcon />}
+                  title={team.deletable ? "Disband team" : "A team with submissions cannot be disbanded"}
+                  onClick={() => disbandTeam(team)}
+                >
+                  Disband
+                </Button>
+              ) : null}
+            </Stack>
+          </Card>
+        ))}
+      </Box>
+
+      {teams.length === 0 ? (
+        <Box className="ms-empty">
+          <Typography fontWeight={700}>No team yet</Typography>
+          <Typography color="text.secondary" variant="body2">
+            Create a team in an open event to start managing members and submissions.
+          </Typography>
+        </Box>
+      ) : null}
+
       <Box className="team-invitation-head">
         <Box>
           <Typography variant="h6">Pending Invitations</Typography>
           <Typography color="text.secondary" variant="body2">
-            Review invitations first, then open a team only when you are ready to join it.
+            Accept an invitation only when you have not joined another team in the same event.
           </Typography>
         </Box>
         <Chip icon={<MailOutlineRoundedIcon />} label={`${pendingInvitations.length} pending`} variant="outlined" />
       </Box>
 
-      <Card className="ms-data-card" sx={{ mb: 2.5 }}>
+      <Card className="ms-data-card">
         <Box className="team-table-scroll">
           <Table>
             <TableHead>
@@ -786,85 +883,6 @@ export default function TeamManagementPanel() {
           </Table>
         </Box>
       </Card>
-
-      <Box className="team-summary-strip">
-        <Card className="team-summary-card">
-          <Typography className="team-summary-label">Active teams</Typography>
-          <Typography className="team-summary-value">{teams.length}</Typography>
-        </Card>
-        <Card className="team-summary-card">
-          <Typography className="team-summary-label">Ready teams</Typography>
-          <Typography className="team-summary-value">{readyTeams}</Typography>
-        </Card>
-      </Box>
-
-      <Box className="team-grid">
-        {teams.map((team) => (
-          <Card className="team-card" key={team.teamId}>
-            <Box className="team-card-head">
-              <Box className="team-card-title">
-                <Box className="team-card-icon"><GroupsRoundedIcon fontSize="small" /></Box>
-                <Box>
-                  <Typography variant="h6">{team.teamName}</Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {team.eventName || "Not registered in any event yet"}
-                  </Typography>
-                </Box>
-              </Box>
-              <Chip
-                color={team.membershipValid ? "success" : "warning"}
-                label={team.membershipValid ? "Ready" : "Forming"}
-                size="small"
-              />
-            </Box>
-            <Divider />
-            <Box className="team-card-body">
-              <div><span>Event</span><strong>{team.eventName || "Not registered yet"}</strong></div>
-              <div><span>Track</span><strong>{team.trackName || "Pending event registration"}</strong></div>
-              <div><span>Team Leader</span><strong>{team.leaderName}</strong></div>
-              <div><span>Members</span><strong>{getTeamHealth(team).members}</strong></div>
-            </Box>
-            <Typography className="team-validation" color={team.membershipValid ? "success.main" : "warning.main"}>
-              {team.validationMessage}
-            </Typography>
-            <Stack className="team-actions" direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              <Button size="small" variant="outlined" endIcon={<OpenInNewRoundedIcon />} onClick={() => openTeam(team.teamId)}>
-                Open Team
-              </Button>
-              <Button
-                color="error"
-                size="small"
-                startIcon={<ExitToAppRoundedIcon />}
-                onClick={() => leaveTeam(team)}
-              >
-                Leave
-              </Button>
-              {team.currentUserLeader ? (
-                <Button
-                  color="error"
-                  disabled={!team.deletable}
-                  size="small"
-                  startIcon={<DeleteOutlineRoundedIcon />}
-                  title={team.deletable ? "Disband team" : "A team with submissions cannot be disbanded"}
-                  onClick={() => disbandTeam(team)}
-                >
-                  Disband
-                </Button>
-              ) : null}
-            </Stack>
-          </Card>
-        ))}
-      </Box>
-
-      {teams.length === 0 ? (
-        <Box className="ms-empty">
-          <Typography fontWeight={700}>No team yet</Typography>
-          <Typography color="text.secondary" variant="body2">
-            Create your first team here, then register it into an event from the Event Registration module.
-          </Typography>
-        </Box>
-      ) : null}
-
     </>
   );
 
@@ -883,11 +901,7 @@ export default function TeamManagementPanel() {
         <ModulePageHeader
           eyebrow="Team Workspace"
           title={selectedTeam.teamName}
-          description={
-            selectedTeam.eventName
-              ? `${selectedTeam.eventName} / ${selectedTeam.trackName || "Track pending"}`
-              : "This team has not been registered into an event yet."
-          }
+          description={`${selectedTeam.eventName} / ${selectedTeam.trackName}`}
           actions={(
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               <Chip
@@ -914,29 +928,18 @@ export default function TeamManagementPanel() {
                 <Typography color="text.secondary">{selectedTeam.validationMessage}</Typography>
               </Box>
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                <Chip label={`Event: ${selectedTeam.eventName || "Not registered yet"}`} variant="outlined" />
-                <Chip label={`Track: ${selectedTeam.trackName || "Pending registration"}`} variant="outlined" />
+                <Chip label={`Track: ${selectedTeam.trackName}`} variant="outlined" />
                 <Chip label={`Members: ${teamHealth.members}`} variant="outlined" />
+                <Chip label={`Submission: ${teamHealth.submission}`} variant="outlined" />
+                <Chip label={`Round: ${teamHealth.round}`} variant="outlined" />
+                <Chip label={`Deadline: ${teamHealth.deadline}`} variant="outlined" />
                 <Chip label={`Leader: ${selectedTeam.leaderName}`} variant="outlined" />
               </Stack>
             </Stack>
           </CardContent>
         </Card>
 
-        <Card className="ms-data-card">
-          <CardContent>
-            <Box className="ms-empty">
-              <Typography fontWeight={800}>
-                {selectedTeam.eventId ? "Use the Submissions module for delivery" : "Register this team into an event next"}
-              </Typography>
-              <Typography color="text.secondary" variant="body2">
-                {selectedTeam.eventId
-                  ? "This page now focuses on team members and invitations. Open the Submissions module from the sidebar when you are ready to submit."
-                  : "This team is ready for member management here. Register it from the Event Registration module when you want to join an event."}
-              </Typography>
-            </Box>
-          </CardContent>
-        </Card>
+        {renderSubmissionPanel()}
 
         {selectedTeam.currentUserLeader ? (
           <Card className="ms-data-card">
@@ -1152,11 +1155,25 @@ export default function TeamManagementPanel() {
         <DialogTitle>Create Team</DialogTitle>
         <DialogContent>
           <Stack spacing={1.5} sx={{ pt: 1 }}>
+            <TextField select label="Event" value={createForm.eventId} onChange={selectEvent} fullWidth>
+              {registrationEvents.map((event) => (
+                <MenuItem key={event.eventId} value={String(event.eventId)}>{event.name}</MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select
+              label="Track"
+              value={createForm.trackId}
+              onChange={(event) => setCreateForm({ ...createForm, trackId: event.target.value })}
+              disabled={!createForm.eventId}
+              fullWidth
+            >
+              {tracks.map((track) => <MenuItem key={track.trackId} value={String(track.trackId)}>{track.name}</MenuItem>)}
+            </TextField>
             <TextField
               label="Team name"
               value={createForm.teamName}
               onChange={(event) => setCreateForm({ ...createForm, teamName: event.target.value })}
-              helperText="Create the team first. Event and track registration happen later in Event Registration."
               fullWidth
             />
           </Stack>
@@ -1165,7 +1182,7 @@ export default function TeamManagementPanel() {
           <Button onClick={closeCreateDialog}>Cancel</Button>
           <Button
             onClick={submitCreate}
-            disabled={saving || !createForm.teamName.trim()}
+            disabled={saving || !createForm.trackId || !createForm.teamName.trim()}
             variant="contained"
           >
             Create

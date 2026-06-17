@@ -25,11 +25,6 @@ export const authStorage = {
     otherStorage.removeItem(AUTH_STORAGE_KEY);
     targetStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload));
   },
-  update(payload) {
-    const inLocal = localStorage.getItem(AUTH_STORAGE_KEY);
-    const targetStorage = inLocal ? localStorage : sessionStorage;
-    targetStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload));
-  },
   clear() {
     localStorage.removeItem(AUTH_STORAGE_KEY);
     sessionStorage.removeItem(AUTH_STORAGE_KEY);

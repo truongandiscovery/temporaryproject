@@ -117,7 +117,7 @@ export default function LoginPage() {
 
       authStorage.set(data?.auth);
       googleRegistrationStorage.clear();
-      navigate(data?.auth?.mustChangePassword ? "/dashboard?section=password&forcePasswordChange=1" : "/dashboard");
+      navigate("/dashboard");
     } catch (err) {
       const failure = getLoginFailure(err);
       if (failure.resubmitToken) {
@@ -157,7 +157,7 @@ export default function LoginPage() {
       });
       authStorage.set(response.data?.data, rememberDevice);
       googleRegistrationStorage.clear();
-      navigate(response.data?.data?.mustChangePassword ? "/dashboard?section=password&forcePasswordChange=1" : "/dashboard");
+      navigate("/dashboard");
     } catch (err) {
       const failure = getLoginFailure(err);
       if (failure.resubmitToken) {

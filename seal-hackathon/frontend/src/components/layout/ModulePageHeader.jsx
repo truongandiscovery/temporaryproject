@@ -4,6 +4,7 @@ import { brand } from "../../styles/designTokens";
 export default function ModulePageHeader({
   eyebrow,
   title,
+  titleSuffix = null,
   description,
   actions = null,
   children = null,
@@ -37,16 +38,19 @@ export default function ModulePageHeader({
               {eyebrow}
             </Typography>
           ) : null}
-          <Typography
-            sx={{
-              color: brand.colors.text,
-              fontSize: 22,
-              fontWeight: 950,
-              lineHeight: 1.18,
-            }}
-          >
-            {title}
-          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography
+              sx={{
+                color: brand.colors.text,
+                fontSize: 22,
+                fontWeight: 950,
+                lineHeight: 1.18,
+              }}
+            >
+              {title}
+            </Typography>
+            {titleSuffix}
+          </Stack>
           {description ? (
             <Typography
               sx={{

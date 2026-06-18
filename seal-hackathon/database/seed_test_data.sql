@@ -8,7 +8,7 @@ GO
 INSERT INTO [Users] (username, email, password_hash, full_name, avatar_url, bio, status, is_approved)
 VALUES
 ('an.student', 'an.seal.demo@gmail.com', '$2a$10$YTjZK23.EGEb.vCcgZv.0.qm9EQQmZFis7DpEYSUdTai/6wPaK1Vu', N'Nguyen Van An', NULL, N'FPT Software Engineering student focused on product execution and team coordination.', 'Active', 1),
-('toan.coordinator', 'toan.seal.demo@gmail.com', '$2a$10$YTjZK23.EGEb.vCcgZv.0.qm9EQQmZFis7DpEYSUdTai/6wPaK1Vu', N'Toan Tran', NULL, N'Coordinator for event operations, participant approval, and seasonal planning.', 'Active', 1),
+('toan.coordinator', 'toan.seal.demo@gmail.com', '$2a$10$YTjZK23.EGEb.vCcgZv.0.qm9EQQmZFis7DpEYSUdTai/6wPaK1Vu', N'Toan Tran', NULL, N'Coordinator for event operations, participant approval, and semester planning.', 'Active', 1),
 ('kiet.mentor', 'kiet.seal.demo@gmail.com', '$2a$10$YTjZK23.EGEb.vCcgZv.0.qm9EQQmZFis7DpEYSUdTai/6wPaK1Vu', N'Kiet Le', NULL, N'Mentor supporting web architecture, product direction, and technical tradeoffs.', 'Active', 1),
 ('ngon.judge', 'ngon.seal.demo@gmail.com', '$2a$10$YTjZK23.EGEb.vCcgZv.0.qm9EQQmZFis7DpEYSUdTai/6wPaK1Vu', N'Ngon Pham', NULL, N'Guest judge reviewing implementation quality, product value, and presentation.', 'Active', 1),
 ('linh.student', 'linh.seal.demo@gmail.com', '$2a$10$YTjZK23.EGEb.vCcgZv.0.qm9EQQmZFis7DpEYSUdTai/6wPaK1Vu', N'Linh Vo', NULL, N'External student interested in cross-university collaboration and applied software delivery.', 'Active', 1),
@@ -140,10 +140,172 @@ WHERE u.username = 'trinh.judge' AND ur.role_type = 'Judge';
 GO
 
 -- =======================================================
+-- Seed Spring 2026 event with participating teams
+-- =======================================================
+INSERT INTO HackathonEvent (
+    name, semester, year, start_date, end_date,
+    registration_start_at, registration_end_at,
+    competition_start_at, competition_end_at,
+    track_selection_mode, ranking_method, awards_json,
+    published_at, status, description
+)
+VALUES (
+    N'SEAL Spring 2026', 'Spring', 2026, '2026-02-10', '2026-04-20',
+    '2026-02-01T08:00:00', '2026-02-08T23:59:00',
+    '2026-02-10T08:00:00', '2026-04-20T18:00:00',
+    'TEAM_SELECT', 'FINAL_SCORE', N'[{"awardName":"Champion","quantity":1},{"awardName":"Runner-up","quantity":1},{"awardName":"Best Innovation","quantity":1}]',
+    GETDATE(), 'Ongoing', N'Seeded Spring 2026 event for participant and team testing'
+);
+GO
+
+DECLARE @spring_event_id INT = (
+    SELECT TOP 1 event_id
+    FROM HackathonEvent
+    WHERE name = N'SEAL Spring 2026'
+    ORDER BY event_id DESC
+);
+DECLARE @spring_coordinator_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'toan.coordinator' AND ur.role_type = 'Coordinator'
+);
+DECLARE @spring_mentor_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'vy.mentor' AND ur.role_type = 'Mentor'
+);
+DECLARE @spring_judge_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'hao.judge' AND ur.role_type = 'Judge'
+);
+DECLARE @spring_student_leader_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'an.student' AND ur.role_type = 'Student'
+);
+DECLARE @spring_student_member_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'linh.student' AND ur.role_type = 'Student'
+);
+DECLARE @spring_student_third_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'mai.student' AND ur.role_type = 'Student'
+);
+DECLARE @spring_student_ai_leader_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'bao.student' AND ur.role_type = 'Student'
+);
+DECLARE @spring_student_ai_member_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'quynh.student' AND ur.role_type = 'Student'
+);
+DECLARE @spring_student_ai_third_role_id INT = (
+    SELECT TOP 1 ur.user_role_id
+    FROM UserRole ur
+    JOIN [Users] u ON u.user_id = ur.user_id
+    WHERE u.username = 'phuc.student' AND ur.role_type = 'Student'
+);
+
+INSERT INTO Track (event_id, name)
+VALUES
+(@spring_event_id, N'Web Platform'),
+(@spring_event_id, N'AI & Data');
+
+INSERT INTO Round (event_id, round_name, round_order, start_at, end_at, submission_deadline, promotion_rule_top_n, is_final)
+VALUES
+(@spring_event_id, N'Qualifier', 1, '2026-02-10T08:00:00', '2026-03-15T23:59:00', '2026-03-15T23:59:00', 2, 0),
+(@spring_event_id, N'Finals', 2, '2026-04-10T08:00:00', '2026-04-20T18:00:00', '2026-04-20T18:00:00', NULL, 1);
+
+DECLARE @spring_track_web_id INT = (
+    SELECT TOP 1 track_id
+    FROM Track
+    WHERE event_id = @spring_event_id AND name = N'Web Platform'
+    ORDER BY track_id DESC
+);
+DECLARE @spring_track_ai_id INT = (
+    SELECT TOP 1 track_id
+    FROM Track
+    WHERE event_id = @spring_event_id AND name = N'AI & Data'
+    ORDER BY track_id DESC
+);
+DECLARE @spring_round_id INT = (
+    SELECT TOP 1 round_id
+    FROM Round
+    WHERE event_id = @spring_event_id AND round_name = N'Qualifier'
+    ORDER BY round_id DESC
+);
+
+INSERT INTO EventCoordinatorAssignment (event_id, user_role_id)
+VALUES (@spring_event_id, @spring_coordinator_role_id);
+
+INSERT INTO TrackMentor (track_id, user_role_id)
+VALUES
+(@spring_track_web_id, @spring_mentor_role_id),
+(@spring_track_ai_id, @spring_mentor_role_id);
+
+INSERT INTO JudgeAssignment (round_id, track_id, user_role_id)
+VALUES
+(@spring_round_id, @spring_track_web_id, @spring_judge_role_id),
+(@spring_round_id, @spring_track_ai_id, @spring_judge_role_id);
+
+INSERT INTO Team (track_id, user_role_id, team_name)
+VALUES
+(@spring_track_web_id, @spring_student_leader_role_id, N'Spring Web Sparks'),
+(@spring_track_ai_id, @spring_student_ai_leader_role_id, N'Spring AI Builders');
+
+DECLARE @spring_web_team_id INT = (
+    SELECT TOP 1 team_id
+    FROM Team
+    WHERE team_name = N'Spring Web Sparks'
+    ORDER BY team_id DESC
+);
+DECLARE @spring_ai_team_id INT = (
+    SELECT TOP 1 team_id
+    FROM Team
+    WHERE team_name = N'Spring AI Builders'
+    ORDER BY team_id DESC
+);
+
+INSERT INTO TeamMember (team_id, user_role_id)
+VALUES
+(@spring_web_team_id, @spring_student_leader_role_id),
+(@spring_web_team_id, @spring_student_member_role_id),
+(@spring_web_team_id, @spring_student_third_role_id),
+(@spring_ai_team_id, @spring_student_ai_leader_role_id),
+(@spring_ai_team_id, @spring_student_ai_member_role_id),
+(@spring_ai_team_id, @spring_student_ai_third_role_id);
+GO
+
+-- =======================================================
 -- Seed event, track, rounds, criteria
 -- =======================================================
-INSERT INTO HackathonEvent (name, season, year, start_date, end_date, status, description)
-VALUES (N'SEAL Summer 2026', 'Summer', 2026, '2026-06-15', '2026-07-20', 'RegistrationOpen', N'Official seeded event for sprint integration testing');
+INSERT INTO HackathonEvent (
+    name, semester, year, start_date, end_date,
+    registration_start_at, registration_end_at,
+    competition_start_at, competition_end_at,
+    track_selection_mode, ranking_method, awards_json,
+    published_at, status, description
+)
+VALUES (
+    N'SEAL Summer 2026', 'Summer', 2026, '2026-06-15', '2026-07-20',
+    '2026-06-10T08:00:00', '2026-06-25T23:59:00',
+    '2026-06-15T08:00:00', '2026-07-20T18:00:00',
+    'TEAM_SELECT', 'FINAL_SCORE', N'[{"awardName":"Champion","quantity":1},{"awardName":"Runner-up","quantity":1}]',
+    GETDATE(), 'Ongoing', N'Official seeded event for sprint integration testing'
+);
 GO
 
 DECLARE @event_id INT = (SELECT TOP 1 event_id FROM HackathonEvent WHERE name = N'SEAL Summer 2026' ORDER BY event_id DESC);
@@ -156,10 +318,10 @@ GO
 
 DECLARE @event_id_2 INT = (SELECT TOP 1 event_id FROM HackathonEvent WHERE name = N'SEAL Summer 2026' ORDER BY event_id DESC);
 
-INSERT INTO Round (event_id, round_name, round_order, submission_deadline, promotion_rule_top_n)
+INSERT INTO Round (event_id, round_name, round_order, start_at, end_at, submission_deadline, promotion_rule_top_n, is_final)
 VALUES
-(@event_id_2, N'Elimination', 1, '2026-06-30T23:59:00', 2),
-(@event_id_2, N'Finals', 2, '2026-07-18T23:59:00', 1);
+(@event_id_2, N'Elimination', 1, '2026-06-20T08:00:00', '2026-06-30T23:59:00', '2026-06-30T23:59:00', 2, 0),
+(@event_id_2, N'Finals', 2, '2026-07-15T08:00:00', '2026-07-18T23:59:00', '2026-07-18T23:59:00', NULL, 1);
 GO
 
 DECLARE @elim_round_id INT = (
@@ -265,6 +427,6 @@ SELECT user_id, username, email, status, is_approved
 FROM [Users]
 ORDER BY user_id;
 
-SELECT event_id, name, season, year, status FROM HackathonEvent ORDER BY event_id DESC;
+SELECT event_id, name, status FROM HackathonEvent ORDER BY event_id DESC;
 SELECT team_id, team_name, status FROM Team ORDER BY team_id DESC;
 GO

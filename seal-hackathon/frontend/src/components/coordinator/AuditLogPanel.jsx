@@ -6,6 +6,7 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Divider,
   MenuItem,
   Stack,
   TextField,
@@ -13,20 +14,46 @@ import {
 } from "@mui/material";
 import HistoryRoundedIcon from "@mui/icons-material/HistoryRounded";
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
-import { getApiErrorMessage, http } from "../../api/http";
+import PersonOutlineRoundedIcon from "@mui/icons-material/PersonOutlineRounded";
+import DnsRoundedIcon from "@mui/icons-material/DnsRounded";
+import EditNoteRoundedIcon from "@mui/icons-material/EditNoteRounded";
+import UpdateRoundedIcon from "@mui/icons-material/UpdateRounded";
 import CenteredNotification from "../layout/CenteredNotification";
 import ModulePageHeader from "../layout/ModulePageHeader";
+import { getApiErrorMessage, http } from "../../api/http";
 import { brand } from "../../styles/designTokens";
 
 const ACTION_OPTIONS = [
   "",
+  "ACCOUNT_APPROVED",
+  "ACCOUNT_REJECTED",
+  "ACCOUNT_RESUBMITTED",
+  "ACCOUNT_SUSPENDED",
+  "USER_UPDATED",
+  "GUEST_JUDGE_CREATED",
+  "GUEST_JUDGE_PASSWORD_RESET",
+  "GUEST_JUDGE_DEACTIVATED",
+  "EVENT_CREATED",
+  "EVENT_UPDATED",
+  "EVENT_PUBLISHED",
+  "EVENT_DELETED",
+  "ROUND_CREATED",
+  "ROUND_UPDATED",
+  "ROUND_SUBMISSION_OPENED",
+  "ROUND_SUBMISSION_CLOSED",
+  "ROUND_SCORING_FINALIZED",
+  "ROUND_SCORING_REOPENED",
+  "TRACK_CREATED",
+  "TRACK_UPDATED",
+  "TRACK_DELETED",
+  "TEAM_REGISTERED_FOR_EVENT",
+  "SUBMISSION_CREATED",
+  "SUBMISSION_UPDATED",
   "ROUND_CRITERIA_UPDATED",
   "CRITERIA_TEMPLATE_CREATED",
   "CRITERIA_TEMPLATE_UPDATED",
   "CRITERIA_TEMPLATE_DELETED",
   "CRITERIA_TEMPLATE_APPLIED",
-  "ROUND_SCORING_FINALIZED",
-  "ROUND_SCORING_REOPENED",
   "JUDGE_SCORES_SAVED_DRAFT",
   "JUDGE_SCORES_FINALIZED",
   "JUDGE_EVALUATION_REOPENED",
@@ -37,7 +64,7 @@ function formatDateTime(value) {
   if (!value) return "Unknown";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString("en-US", {
+  return date.toLocaleString("en-GB", {
     year: "numeric",
     month: "short",
     day: "2-digit",
@@ -45,6 +72,28 @@ function formatDateTime(value) {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function formatActionLabel(value) {
+  if (!value) return "Unknown action";
+  return value
+    .split("_")
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0) + segment.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function formatTargetLabel(log) {
+  const parts = [];
+  if (log.targetEntity) {
+    parts.push(log.targetEntity);
+  }
+  if (log.targetName) {
+    parts.push(log.targetName);
+  } else if (log.targetId) {
+    parts.push(`ID ${log.targetId}`);
+  }
+  return parts.join(" - ") || "General";
 }
 
 function formatPayload(value) {
@@ -56,21 +105,65 @@ function formatPayload(value) {
   }
 }
 
+function renderKeyValue(label, value, icon = null) {
+  return (
+    <Stack spacing={0.4} sx={{ minWidth: 0 }}>
+      <Stack direction="row" spacing={0.8} alignItems="center">
+        {icon}
+        <Typography sx={{ color: brand.colors.muted, fontSize: 12, fontWeight: 800 }}>
+          {label}
+        </Typography>
+      </Stack>
+      <Typography
+        sx={{
+          color: brand.colors.text,
+          fontSize: 14,
+          fontWeight: 700,
+          wordBreak: "break-word",
+        }}
+      >
+        {value || "N/A"}
+      </Typography>
+    </Stack>
+  );
+}
+
+function JsonBlock({ title, value, tone = "dark" }) {
+  if (!value) return null;
+  return (
+    <Box sx={{ flex: 1, minWidth: 0 }}>
+      <Typography sx={{ color: brand.colors.muted, fontSize: 12, fontWeight: 900, mb: 0.75 }}>
+        {title}
+      </Typography>
+      <Box
+        component="pre"
+        sx={{
+          m: 0,
+          p: 1.25,
+          borderRadius: brand.radius.sm,
+          bgcolor: tone === "dark" ? "#0f172a" : "#172554",
+          color: "#e2e8f0",
+          fontSize: 12,
+          overflowX: "auto",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          minHeight: 108,
+        }}
+      >
+        {formatPayload(value)}
+      </Box>
+    </Box>
+  );
+}
+
 export default function AuditLogPanel() {
   const [events, setEvents] = useState([]);
-  const [rounds, setRounds] = useState([]);
   const [selectedEventId, setSelectedEventId] = useState("");
-  const [selectedRoundId, setSelectedRoundId] = useState("");
   const [actionType, setActionType] = useState("");
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
-
-  const scopedRounds = useMemo(
-    () => rounds.filter((round) => !selectedEventId || String(round.eventId) === String(selectedEventId)),
-    [rounds, selectedEventId]
-  );
 
   const loadEvents = async () => {
     const response = await http.get("/api/coordinator/events");
@@ -80,20 +173,6 @@ export default function AuditLogPanel() {
       setSelectedEventId(String(nextEvents[0].eventId));
     }
     return nextEvents;
-  };
-
-  const loadRounds = async (eventId) => {
-    if (!eventId) {
-      setRounds([]);
-      setSelectedRoundId("");
-      return;
-    }
-    const response = await http.get(`/api/coordinator/events/${eventId}/rounds`);
-    const nextRounds = response.data?.data || [];
-    setRounds(nextRounds);
-    if (selectedRoundId && !nextRounds.some((round) => String(round.roundId) === String(selectedRoundId))) {
-      setSelectedRoundId("");
-    }
   };
 
   const loadLogs = async ({ silent = false } = {}) => {
@@ -106,7 +185,6 @@ export default function AuditLogPanel() {
     try {
       const params = {};
       if (selectedEventId) params.eventId = selectedEventId;
-      if (selectedRoundId) params.roundId = selectedRoundId;
       if (actionType) params.actionType = actionType;
       const response = await http.get("/api/coordinator/scoring/audit-logs", { params });
       setLogs(response.data?.data || []);
@@ -123,11 +201,7 @@ export default function AuditLogPanel() {
     const bootstrap = async () => {
       setLoading(true);
       try {
-        const nextEvents = await loadEvents();
-        const initialEventId = selectedEventId || nextEvents[0]?.eventId;
-        if (initialEventId) {
-          await loadRounds(initialEventId);
-        }
+        await loadEvents();
       } catch (err) {
         setError(getApiErrorMessage(err, "Failed to load audit workspace"));
       } finally {
@@ -138,16 +212,9 @@ export default function AuditLogPanel() {
   }, []);
 
   useEffect(() => {
-    if (!selectedEventId) return;
-    loadRounds(selectedEventId).catch((err) => {
-      setError(getApiErrorMessage(err, "Failed to load rounds"));
-    });
-  }, [selectedEventId]);
-
-  useEffect(() => {
     if (loading) return;
     loadLogs({ silent: false });
-  }, [selectedEventId, selectedRoundId, actionType]);
+  }, [selectedEventId, actionType]);
 
   if (loading) {
     return (
@@ -159,16 +226,12 @@ export default function AuditLogPanel() {
 
   return (
     <Box>
-      <CenteredNotification
-        message={error}
-        severity="error"
-        onClose={() => setError("")}
-      />
+      <CenteredNotification message={error} severity="error" onClose={() => setError("")} />
 
       <ModulePageHeader
-        eyebrow="Scoring Oversight"
+        eyebrow="Audit Trail"
         title="Audit Log & Activity Tracking"
-        description="Review coordinator, judge, and mentor actions across rubric changes, template use, scoring, and feedback."
+        description="Review who changed what, on which object, when it happened, and how the data changed before and after."
         actions={(
           <Button
             variant="outlined"
@@ -189,12 +252,12 @@ export default function AuditLogPanel() {
         }}
       >
         <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
-          <Stack spacing={1.4} sx={{ mb: 2 }}>
+          <Stack spacing={1.4} sx={{ mb: 2.2 }}>
             <Typography sx={{ color: brand.colors.text, fontSize: 18, fontWeight: 900 }}>
-              Activity Stream
+              Activity stream
             </Typography>
             <Typography sx={{ color: brand.colors.muted, fontSize: 14 }}>
-              Filter event, round, and action type to inspect the exact change history.
+              Filter by event or action to inspect approvals, event updates, track and round changes, submissions, and scoring work.
             </Typography>
           </Stack>
 
@@ -203,65 +266,52 @@ export default function AuditLogPanel() {
             spacing={1.2}
             flexWrap="wrap"
             useFlexGap
-            sx={{ mb: 2 }}
+            sx={{ mb: 2.25 }}
           >
             <TextField
               select
               label="Event"
               value={selectedEventId}
               onChange={(event) => setSelectedEventId(event.target.value)}
-              sx={{ minWidth: 220 }}
+              sx={{ minWidth: 230 }}
             >
               {events.map((item) => (
                 <MenuItem key={item.eventId} value={String(item.eventId)}>
-                  {item.name} ({item.season} {item.year})
+                  {item.name}
                 </MenuItem>
               ))}
             </TextField>
 
             <TextField
               select
-              label="Round"
-              value={selectedRoundId}
-              onChange={(event) => setSelectedRoundId(event.target.value)}
-              sx={{ minWidth: 220 }}
-            >
-              <MenuItem value="">All Rounds</MenuItem>
-              {scopedRounds.map((item) => (
-                <MenuItem key={item.roundId} value={String(item.roundId)}>
-                  {item.roundOrder}. {item.roundName}
-                </MenuItem>
-              ))}
-            </TextField>
-
-            <TextField
-              select
-              label="Action Type"
+              label="Action"
               value={actionType}
               onChange={(event) => setActionType(event.target.value)}
-              sx={{ minWidth: 260 }}
+              sx={{ minWidth: 280 }}
             >
-              <MenuItem value="">All Actions</MenuItem>
+              <MenuItem value="">All actions</MenuItem>
               {ACTION_OPTIONS.filter(Boolean).map((item) => (
-                <MenuItem key={item} value={item}>{item}</MenuItem>
+                <MenuItem key={item} value={item}>
+                  {formatActionLabel(item)}
+                </MenuItem>
               ))}
             </TextField>
           </Stack>
 
           {logs.length === 0 ? (
             <Box className="ms-empty">
-              <Typography fontWeight={800}>No audit activity found</Typography>
+              <Typography fontWeight={800}>No audit entries found</Typography>
               <Typography variant="body2" color="text.secondary">
-                Try broadening the filters or perform scoring actions to generate tracking records.
+                Try a broader filter or perform an audited action first.
               </Typography>
             </Box>
           ) : (
-            <Stack spacing={1.3}>
+            <Stack spacing={1.4}>
               {logs.map((log) => (
                 <Box
                   key={log.logId}
                   sx={{
-                    p: 1.6,
+                    p: 1.8,
                     borderRadius: brand.radius.md,
                     border: `1px solid ${brand.colors.line}`,
                     bgcolor: brand.colors.surfaceSoft,
@@ -270,14 +320,14 @@ export default function AuditLogPanel() {
                   <Stack
                     direction={{ xs: "column", lg: "row" }}
                     justifyContent="space-between"
-                    spacing={1.2}
-                    sx={{ mb: 1 }}
+                    spacing={1.5}
+                    sx={{ mb: 1.5 }}
                   >
-                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                    <Stack direction="row" spacing={1.1} alignItems="center">
                       <Box
                         sx={{
-                          width: 34,
-                          height: 34,
+                          width: 36,
+                          height: 36,
                           borderRadius: 2,
                           bgcolor: brand.colors.surfaceWarm,
                           color: brand.colors.orange,
@@ -289,74 +339,81 @@ export default function AuditLogPanel() {
                       </Box>
                       <Box>
                         <Typography sx={{ color: brand.colors.text, fontWeight: 900 }}>
-                          {log.actionType}
+                          {formatActionLabel(log.actionType)}
                         </Typography>
                         <Typography sx={{ color: brand.colors.muted, fontSize: 13 }}>
-                          {log.userName} • {formatDateTime(log.timestamp)}
+                          {formatDateTime(log.timestamp)}
                         </Typography>
                       </Box>
                     </Stack>
+
                     <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                      <Chip size="small" label={log.targetEntity} />
-                      <Chip size="small" variant="outlined" label={`Target #${log.targetId}`} />
+                      <Chip size="small" label={log.targetEntity || "General"} />
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label={log.targetName || (log.targetId ? `ID ${log.targetId}` : "No target name")}
+                      />
                     </Stack>
                   </Stack>
 
-                  {log.reason ? (
-                    <Typography sx={{ color: brand.colors.text, fontSize: 14, mb: 1 }}>
-                      {log.reason}
-                    </Typography>
-                  ) : null}
-
-                  <Stack direction={{ xs: "column", xl: "row" }} spacing={1.2}>
-                    {log.oldValue ? (
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography sx={{ color: brand.colors.muted, fontSize: 12, fontWeight: 900, mb: 0.6 }}>
-                          PREVIOUS STATE
-                        </Typography>
-                        <Box
-                          component="pre"
-                          sx={{
-                            m: 0,
-                            p: 1.2,
-                            borderRadius: brand.radius.sm,
-                            bgcolor: "#0f172a",
-                            color: "#e2e8f0",
-                            fontSize: 12,
-                            overflowX: "auto",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
-                          }}
-                        >
-                          {formatPayload(log.oldValue)}
-                        </Box>
-                      </Box>
-                    ) : null}
-
-                    {log.newValue ? (
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography sx={{ color: brand.colors.muted, fontSize: 12, fontWeight: 900, mb: 0.6 }}>
-                          NEW STATE
-                        </Typography>
-                        <Box
-                          component="pre"
-                          sx={{
-                            m: 0,
-                            p: 1.2,
-                            borderRadius: brand.radius.sm,
-                            bgcolor: "#071A2F",
-                            color: "#e2e8f0",
-                            fontSize: 12,
-                            overflowX: "auto",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
-                          }}
-                        >
-                          {formatPayload(log.newValue)}
-                        </Box>
-                      </Box>
-                    ) : null}
+                  <Stack
+                    direction={{ xs: "column", md: "row" }}
+                    spacing={2}
+                    useFlexGap
+                    flexWrap="wrap"
+                    sx={{ mb: 1.6 }}
+                  >
+                    {renderKeyValue(
+                      "Actor",
+                      log.actorName
+                        ? `${log.actorName}${log.actorUsername ? ` (@${log.actorUsername})` : ""}`
+                        : "Unknown",
+                      <PersonOutlineRoundedIcon sx={{ fontSize: 15, color: brand.colors.muted }} />
+                    )}
+                    {renderKeyValue(
+                      "Action",
+                      formatActionLabel(log.actionType),
+                      <EditNoteRoundedIcon sx={{ fontSize: 15, color: brand.colors.muted }} />
+                    )}
+                    {renderKeyValue(
+                      "Target",
+                      formatTargetLabel(log),
+                      <DnsRoundedIcon sx={{ fontSize: 15, color: brand.colors.muted }} />
+                    )}
+                    {renderKeyValue(
+                      "Timestamp",
+                      formatDateTime(log.timestamp),
+                      <UpdateRoundedIcon sx={{ fontSize: 15, color: brand.colors.muted }} />
+                    )}
                   </Stack>
+
+                  {(log.reason || log.ipAddress || log.deviceInfo) && (
+                    <>
+                      <Divider sx={{ my: 1.4 }} />
+                      <Stack
+                        direction={{ xs: "column", md: "row" }}
+                        spacing={2}
+                        useFlexGap
+                        flexWrap="wrap"
+                        sx={{ mb: 1.6 }}
+                      >
+                        {log.reason ? renderKeyValue("Reason", log.reason) : null}
+                        {log.ipAddress ? renderKeyValue("IP Address", log.ipAddress) : null}
+                        {log.deviceInfo ? renderKeyValue("Device", log.deviceInfo) : null}
+                      </Stack>
+                    </>
+                  )}
+
+                  {(log.oldValue || log.newValue) && (
+                    <>
+                      <Divider sx={{ my: 1.4 }} />
+                      <Stack direction={{ xs: "column", xl: "row" }} spacing={1.25}>
+                        <JsonBlock title="OLD VALUE" value={log.oldValue} tone="dark" />
+                        <JsonBlock title="NEW VALUE" value={log.newValue} tone="blue" />
+                      </Stack>
+                    </>
+                  )}
                 </Box>
               ))}
             </Stack>
